@@ -8,10 +8,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-from langchain.messages import HumanMessage, SystemMessage
 from langchain.tools import tool
 
 from opentulpa.agent.file_analysis import extract_docx_text, extract_pdf_text
+from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
 from opentulpa.agent.utils import (
     content_to_text as _content_to_text,
 )

@@ -20,7 +20,6 @@ from typing import Any
 
 import httpx
 from langchain.chat_models import init_chat_model
-from langchain.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from opentulpa.agent.context_compaction import (
@@ -51,6 +50,7 @@ from opentulpa.agent.file_analysis import (
     summarize_uploaded_blob as _summarize_uploaded_blob,
 )
 from opentulpa.agent.graph_builder import build_runtime_graph
+from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage
 from opentulpa.agent.tools_registry import register_runtime_tools
 from opentulpa.agent.utils import (
     content_to_text as _content_to_text,
@@ -114,6 +114,44 @@ class OpenTulpaLangGraphRuntime:
         raw = str(text or "").strip()
         if not raw:
             return None
+
+    @staticmethod
+    def _strip_internal_json_prefix(text: str) -> str:
+        """
+        Remove internal control JSON prefixes that can leak into streamed user output.
+
+        Example internal payloads:
+        - {"selected": []} from skill selector
+        - {"notify_user": false, "reason": "..."} from wake classifier
+        """
+        raw = str(text or "")
+        working = raw.lstrip()
+        changed = False
+        decoder = json.JSONDecoder()
+
+        while working.startswith("{"):
+            try:
+                parsed, end_idx = decoder.raw_decode(working)
+            except Exception:
+                break
+
+            is_internal_selector = (
+                isinstance(parsed, dict)
+                and set(parsed.keys()) == {"selected"}
+                and isinstance(parsed.get("selected"), list)
+            )
+            is_internal_classifier = (
+                isinstance(parsed, dict)
+                and "notify_user" in parsed
+                and set(parsed.keys()).issubset({"notify_user", "reason"})
+            )
+            if not (is_internal_selector or is_internal_classifier):
+                break
+
+            working = working[end_idx:].lstrip()
+            changed = True
+
+        return working if changed else raw
         try:
             parsed = json.loads(raw)
             return parsed if isinstance(parsed, dict) else None
@@ -575,9 +613,10 @@ class OpenTulpaLangGraphRuntime:
         messages = result.get("messages", [])
         for message in reversed(messages):
             if isinstance(message, AIMessage) and (message.content or "").strip():
+                cleaned = self._strip_internal_json_prefix(str(message.content))
                 if through_id is not None and self._context_events is not None:
                     self._context_events.clear_events(customer_id, through_id=through_id)
-                return str(message.content).strip()
+                return cleaned.strip()
         return "I ran into an issue and could not produce a final response yet."
 
     async def astream_text(
@@ -612,7 +651,9 @@ class OpenTulpaLangGraphRuntime:
                 continue
             if message_chunk.content:
                 accumulated += str(message_chunk.content)
-                yield accumulated
+                cleaned = self._strip_internal_json_prefix(accumulated)
+                if cleaned.strip():
+                    yield cleaned
 
         if accumulated and through_id is not None and self._context_events is not None:
             self._context_events.clear_events(customer_id, through_id=through_id)

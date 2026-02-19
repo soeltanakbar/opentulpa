@@ -11,6 +11,7 @@ from opentulpa.api.tulpa_loader import TulpaRouterLoader
 from opentulpa.context.customer_profiles import CustomerProfileService
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.context.service import EventContextService
+from opentulpa.core.ids import new_short_id
 from opentulpa.core.config import get_settings
 from opentulpa.integrations.slack_client import (
     grant_slack_write_consent,
@@ -735,11 +736,10 @@ def create_app(
     async def internal_scheduler_add_routine(request: Request) -> Any:
         sched = _get_scheduler()
         body = await request.json()
-        import uuid
 
         from opentulpa.scheduler.models import Routine
 
-        rid = body.get("id") or str(uuid.uuid4())
+        rid = str(body.get("id", "")).strip() or new_short_id("rtn")
         routine = Routine(
             id=rid,
             name=body.get("name", "Unnamed"),
@@ -1055,20 +1055,31 @@ def create_app(
         return Response(status_code=200)
 
     async def _telegram_background_handler(body: dict, settings: Any):
-        reply = await _get_telegram_chat().handle_update(
-            body=body,
-            allowed_user_ids_csv=settings.telegram_allowed_user_ids,
-            allowed_usernames_csv=settings.telegram_allowed_usernames,
-            agent_runtime=_agent_runtime,
-        )
-        if reply:
-            message = body.get("message") or body.get("edited_message") or {}
-            chat_id = message.get("chat", {}).get("id")
+        message = body.get("message") or body.get("edited_message") or {}
+        chat_id = message.get("chat", {}).get("id")
+        try:
+            reply = await _get_telegram_chat().handle_update(
+                body=body,
+                allowed_user_ids_csv=settings.telegram_allowed_user_ids,
+                allowed_usernames_csv=settings.telegram_allowed_usernames,
+                agent_runtime=_agent_runtime,
+            )
+        except Exception as exc:
+            logger.exception("Unhandled Telegram background handler failure: %s", exc)
             if chat_id is not None:
-                await _get_telegram_client().send_message(
-                    chat_id=chat_id,
-                    text=reply,
-                    parse_mode="HTML",
-                )
+                with suppress(Exception):
+                    await _get_telegram_client().send_message(
+                        chat_id=chat_id,
+                        text="I hit an internal error while processing your message. Please try again.",
+                        parse_mode="HTML",
+                    )
+            return
+
+        if reply and chat_id is not None:
+            await _get_telegram_client().send_message(
+                chat_id=chat_id,
+                text=reply,
+                parse_mode="HTML",
+            )
 
     return app

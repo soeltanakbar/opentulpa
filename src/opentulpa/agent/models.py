@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from langchain.messages import AnyMessage
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
+
+from opentulpa.agent.lc_messages import AnyMessage
 
 
 class AgentState(TypedDict, total=False):

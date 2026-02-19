@@ -5,10 +5,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from langchain.messages import AIMessage, AnyMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import RetryPolicy
 
+from opentulpa.agent.lc_messages import AIMessage, AnyMessage, SystemMessage, ToolMessage
 from opentulpa.agent.models import AgentState
 from opentulpa.agent.utils import (
     extract_relative_delay_minutes as _extract_relative_delay_minutes,

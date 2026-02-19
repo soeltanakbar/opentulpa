@@ -1,7 +1,6 @@
 import asyncio
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -27,7 +26,6 @@ load_dotenv()
 LOG_DIR = REPO_ROOT / ".opentulpa" / "logs"
 APP_LOG = LOG_DIR / "app.log"
 TUNNEL_LOG = LOG_DIR / "cloudflared.log"
-OPENLIT_LOG = LOG_DIR / "openlit.log"
 STARTUP_WAIT_SECONDS = int(os.environ.get("STARTUP_WAIT_SECONDS", "180"))
 
 
@@ -35,115 +33,13 @@ class TulpaManager:
     def __init__(self):
         self.app_proc: subprocess.Popen | None = None
         self.tunnel_proc: subprocess.Popen | None = None
-        self.openlit_started = False
         self.stopping = False
-        self.openlit_enabled = self._as_bool(os.environ.get("OPENLIT_ENABLED"), default=True)
-        self.openlit_auto_start = self._as_bool(os.environ.get("OPENLIT_AUTO_START"), default=True)
-        self.openlit_auto_stop = self._as_bool(os.environ.get("OPENLIT_AUTO_STOP"), default=False)
-        compose_file_raw = os.environ.get(
-            "OPENLIT_COMPOSE_FILE",
-            "plugins/observability/openlit/docker-compose.yml",
-        ).strip()
-        compose_path = Path(compose_file_raw)
-        if not compose_path.is_absolute():
-            compose_path = REPO_ROOT / compose_path
-        self.openlit_compose_file = compose_path.resolve()
 
     def log(self, msg: str):
         print(f"[manager] {msg}")
 
     def error(self, msg: str):
         print(f"[error] {msg}", file=sys.stderr)
-
-    @staticmethod
-    def _as_bool(value: str | None, *, default: bool = False) -> bool:
-        if value is None:
-            return default
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-
-    def _append_openlit_log(self, text: str):
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(OPENLIT_LOG, "a", encoding="utf-8") as f:
-            f.write(text.rstrip() + "\n")
-
-    def _run_compose(self, args: list[str]) -> subprocess.CompletedProcess:
-        compose_dir = self.openlit_compose_file.parent
-        for command in (["docker", "compose"], ["docker-compose"]):
-            try:
-                return subprocess.run(
-                    command + args,
-                    cwd=compose_dir,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-            except FileNotFoundError:
-                continue
-        raise FileNotFoundError("Neither 'docker compose' nor 'docker-compose' is available")
-
-    def start_openlit_stack(self):
-        if not self.openlit_enabled:
-            self.log("OpenLIT plugin disabled (OPENLIT_ENABLED=false).")
-            return
-        if not self.openlit_auto_start:
-            self.log("OpenLIT plugin enabled but auto-start disabled.")
-            return
-        if not self.openlit_compose_file.exists():
-            self.error(f"OpenLIT compose file missing: {self.openlit_compose_file}")
-            return
-
-        compose_dir = self.openlit_compose_file.parent
-        env_file = compose_dir / ".env"
-        env_example = compose_dir / ".env.example"
-        if not env_file.exists() and env_example.exists():
-            shutil.copy2(env_example, env_file)
-            self.log(f"created OpenLIT plugin env file: {env_file}")
-
-        self.log("starting OpenLIT plugin stack...")
-        try:
-            result = self._run_compose(["-f", str(self.openlit_compose_file), "up", "-d"])
-        except Exception as e:
-            self.error(f"OpenLIT plugin start failed: {e}")
-            return
-
-        self._append_openlit_log(
-            "\n".join(
-                [
-                    "--- openlit compose up -d ---",
-                    result.stdout.strip(),
-                    result.stderr.strip(),
-                ]
-            )
-        )
-        if result.returncode != 0:
-            self.error("OpenLIT plugin failed to start (see .opentulpa/logs/openlit.log).")
-            return
-
-        self.openlit_started = True
-        self.log("OpenLIT plugin stack is up (UI: http://127.0.0.1:3000, OTLP: http://127.0.0.1:4318).")
-
-    def stop_openlit_stack(self):
-        if not self.openlit_enabled or not self.openlit_auto_stop or not self.openlit_started:
-            return
-        if not self.openlit_compose_file.exists():
-            return
-        self.log("stopping OpenLIT plugin stack...")
-        try:
-            result = self._run_compose(["-f", str(self.openlit_compose_file), "down"])
-        except Exception as e:
-            self.error(f"OpenLIT plugin stop failed: {e}")
-            return
-        self._append_openlit_log(
-            "\n".join(
-                [
-                    "--- openlit compose down ---",
-                    result.stdout.strip(),
-                    result.stderr.strip(),
-                ]
-            )
-        )
-        if result.returncode != 0:
-            self.error("OpenLIT plugin failed to stop cleanly (see .opentulpa/logs/openlit.log).")
 
     def cleanup_stale_processes(self):
         """Kill any processes listening on our ports."""
@@ -166,7 +62,7 @@ class TulpaManager:
     def rotate_logs(self):
         self.log("rotating logs...")
         LOG_DIR.mkdir(parents=True, exist_ok=True)
-        for log_path in [APP_LOG, TUNNEL_LOG, OPENLIT_LOG]:
+        for log_path in [APP_LOG, TUNNEL_LOG]:
             if log_path.exists():
                 log_path.replace(log_path.with_suffix(".log.old"))
 
@@ -174,7 +70,6 @@ class TulpaManager:
         # 1. Setup
         self.cleanup_stale_processes()
         self.rotate_logs()
-        self.start_openlit_stack()
 
         # Boost environment for Gemini 3 and flaky connections
         os.environ["OPENAI_MAX_RETRIES"] = "10"
@@ -318,7 +213,6 @@ class TulpaManager:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     proc.kill()
-        self.stop_openlit_stack()
 
 
 if __name__ == "__main__":

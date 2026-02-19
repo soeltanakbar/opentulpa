@@ -5,8 +5,7 @@ from __future__ import annotations
 from contextlib import suppress
 from typing import Any
 
-from langchain.messages import HumanMessage, SystemMessage
-
+from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
 from opentulpa.agent.utils import (
     approx_tokens as _approx_tokens,
 )

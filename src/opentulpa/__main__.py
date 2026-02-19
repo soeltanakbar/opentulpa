@@ -15,7 +15,6 @@ from opentulpa.context.thread_rollups import ThreadRollupService
 from opentulpa.core.config import get_settings
 from opentulpa.integrations.slack_client import SlackClient
 from opentulpa.memory.service import MemoryService
-from opentulpa.plugins.observability.openlit import init_openlit_from_env
 from opentulpa.scheduler.service import SchedulerService
 from opentulpa.skills.service import SkillStoreService
 from opentulpa.tasks.service import TaskService
@@ -75,7 +74,6 @@ def _mem0_config_openrouter(
 
 def main() -> None:
     settings = get_settings()
-    init_openlit_from_env()
     project_root = Path(__file__).resolve().parents[2]
     openrouter_api_key = settings.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY")
     qdrant_path = Path(settings.mem0_qdrant_path)

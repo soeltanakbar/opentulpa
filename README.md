@@ -28,38 +28,12 @@ Background-capable AI agent built with **LangGraph** (OpenRouter-backed model) a
 
 If `OPENROUTER_API_KEY` is missing, FastAPI still starts for setup flows, but chat remains disabled until the key is set and the app is restarted.
 
-## OpenLIT plugin (optional)
+## Observability
 
-OpenLIT can run as a separate plugin stack and receive OTLP traces from the app.
+Telemetry/tracing is configured directly in OpenRouter (built-in provider traces in the OpenRouter dashboard).
 
-- Plugin compose files: `plugins/observability/openlit`
-- OpenLIT UI: `http://127.0.0.1:3000`
-- OTLP endpoint: `http://127.0.0.1:4318`
-
-Install Python SDK once:
-
-```bash
-uv pip install openlit
-```
-
-Enable in project `.env`:
-
-```dotenv
-OPENLIT_ENABLED=true
-OPENLIT_AUTO_START=true
-OPENLIT_COMPOSE_FILE=plugins/observability/openlit/docker-compose.yml
-OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
-OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-OTEL_SERVICE_NAME=opentulpa
-OPENLIT_APPLICATION_NAME=opentulpa
-```
-
-`/Users/kvyb/Documents/Code/myapps/opentulpa/start.sh` now defaults `OPENLIT_ENABLED=true` and
-`OPENLIT_AUTO_START=true` unless explicitly overridden, so observability starts alongside the app
-out of the box. Set `OPENLIT_ENABLED=false` to disable.
-
-When enabled, `./start.sh` starts the OpenLIT compose stack before launching OpenTulpa.
-Logs: `.opentulpa/logs/openlit.log`.
+- This repository does not run a local telemetry stack.
+- No local OpenTelemetry/OpenLIT instrumentation is required for normal operation.
 
 ## Environment
 

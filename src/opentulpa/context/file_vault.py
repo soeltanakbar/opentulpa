@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 import sqlite3
-import uuid
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -12,6 +11,7 @@ from typing import Any
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
+from opentulpa.core.ids import new_short_id
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -157,7 +157,7 @@ class FileVaultService:
         cid = str(customer_id or "").strip()
         if not cid:
             raise ValueError("customer_id is required")
-        fid = str(uuid.uuid4())
+        fid = new_short_id("file")
         safe_name = _safe_filename(original_filename or f"{kind}.bin")
         cid_dir = self.root_dir / re.sub(r"[^A-Za-z0-9._-]+", "_", cid)
         cid_dir.mkdir(parents=True, exist_ok=True)

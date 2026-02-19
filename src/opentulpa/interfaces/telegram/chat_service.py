@@ -49,6 +49,25 @@ def _find_session_slots_for_customer_id(customer_id: str) -> list[dict[str, Any]
     return find_session_slots_for_customer_id(customer_id)
 
 
+def _format_agent_error_for_user(exc: Exception) -> str:
+    """Convert backend/model failures into actionable Telegram-safe user messages."""
+    text = str(exc)
+    lowered = text.lower()
+    if "401" in lowered and (
+        "user not found" in lowered
+        or "authentication" in lowered
+        or "invalid api key" in lowered
+        or "unauthorized" in lowered
+    ):
+        return (
+            "Model authentication failed (OpenRouter key is invalid or revoked). "
+            "Set a valid OPENROUTER_API_KEY and restart OpenTulpa."
+        )
+    if "429" in lowered or "rate limit" in lowered:
+        return "The model provider is rate-limiting requests right now. Please try again shortly."
+    return "I hit a backend error while generating a reply. Please try again."
+
+
 async def relay_task_event_via_main_agent(
     *,
     customer_id: str,
@@ -242,14 +261,23 @@ async def handle_telegram_text(
         return None
 
     if bot_token:
-        final = await stream_langgraph_reply_to_telegram(
-            agent_runtime=agent_runtime,
-            thread_id=thread_id,
-            customer_id=customer_id,
-            text=effective_text,
-            bot_token=bot_token,
-            chat_id=ctx.chat_id,
-        )
+        try:
+            final = await stream_langgraph_reply_to_telegram(
+                agent_runtime=agent_runtime,
+                thread_id=thread_id,
+                customer_id=customer_id,
+                text=effective_text,
+                bot_token=bot_token,
+                chat_id=ctx.chat_id,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Telegram streaming reply failed (chat_id=%s, thread_id=%s): %s",
+                ctx.chat_id,
+                thread_id,
+                exc,
+            )
+            return _format_agent_error_for_user(exc)
         if final:
             return None
         debug_log(
@@ -260,12 +288,21 @@ async def handle_telegram_text(
         )
         return "I received your message but no final reply was available yet. Ask again or use /status."
 
-    response = await agent_runtime.ainvoke_text(
-        thread_id=thread_id,
-        customer_id=customer_id,
-        text=effective_text,
-    )
-    return response
+    try:
+        response = await agent_runtime.ainvoke_text(
+            thread_id=thread_id,
+            customer_id=customer_id,
+            text=effective_text,
+        )
+        return response
+    except Exception as exc:
+        logger.exception(
+            "Telegram non-streaming reply failed (chat_id=%s, thread_id=%s): %s",
+            ctx.chat_id,
+            thread_id,
+            exc,
+        )
+        return _format_agent_error_for_user(exc)
 
 
 class TelegramChatService:

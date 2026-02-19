@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import time
-import uuid
 from collections.abc import Callable
 from typing import Any
 
+from opentulpa.core.ids import new_short_id
 from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.interfaces.telegram.constants import DEBUG_LOG_PATH, LOW_SIGNAL_REPLIES
 
@@ -131,7 +131,7 @@ async def relay_event_via_main_agent(
         raw_slot = sessions.get(str(chat_id), {}) if isinstance(sessions, dict) else {}
         wake_thread_id = str(raw_slot.get("wake_thread_id", "")).strip()
         if not wake_thread_id:
-            wake_thread_id = f"wake-{chat_id}-{uuid.uuid4()}"
+            wake_thread_id = new_short_id("wake")
             if isinstance(raw_slot, dict):
                 raw_slot["wake_thread_id"] = wake_thread_id
                 sessions[str(chat_id)] = raw_slot

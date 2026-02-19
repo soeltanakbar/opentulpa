@@ -8,12 +8,12 @@ import json
 import logging
 import sqlite3
 import time
-import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from opentulpa.core.ids import new_short_id
 from opentulpa.tasks.sandbox import (
     append_task_event_log,
     list_artifacts,
@@ -168,7 +168,7 @@ class TaskService:
                     if existing:
                         return self._row_to_task(existing)
 
-                task_id = str(uuid.uuid4())
+                task_id = new_short_id("task")
                 now = _utc_now()
                 conn.execute(
                     """

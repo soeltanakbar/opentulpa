@@ -8,7 +8,13 @@ import re
 import shlex
 from typing import Any
 
-from langchain.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
+from opentulpa.agent.lc_messages import (
+    AIMessage,
+    AnyMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 
 def normalize_model_name(model_name: str) -> str:

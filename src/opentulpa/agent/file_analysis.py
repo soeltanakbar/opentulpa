@@ -9,8 +9,7 @@ from typing import Any
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
-from langchain.messages import HumanMessage, SystemMessage
-
+from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
 from opentulpa.agent.utils import content_to_text as _content_to_text
 
 
