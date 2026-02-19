@@ -49,6 +49,10 @@ def _find_session_slots_for_customer_id(customer_id: str) -> list[dict[str, Any]
     return find_session_slots_for_customer_id(customer_id)
 
 
+def get_session_slot_for_chat_id(chat_id: int) -> dict[str, Any] | None:
+    return STATE_STORE.get_session_slot(chat_id)
+
+
 def _format_agent_error_for_user(exc: Exception) -> str:
     """Convert backend/model failures into actionable Telegram-safe user messages."""
     text = str(exc)
@@ -360,6 +364,9 @@ class TelegramChatService:
 
     def find_session_slots(self, customer_id: str) -> list[dict[str, Any]]:
         return find_session_slots_for_customer_id(customer_id)
+
+    def get_session_slot(self, chat_id: int) -> dict[str, Any] | None:
+        return get_session_slot_for_chat_id(chat_id)
 
     async def relay_task_event(
         self,

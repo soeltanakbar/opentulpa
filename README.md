@@ -6,6 +6,7 @@ Background-capable AI agent built with **LangGraph** (OpenRouter-backed model) a
 
 - **FastAPI** (port `8000`): health endpoints, internal APIs, Telegram webhook.
 - **LangGraph runtime** (in-process): tool-calling agent with SQLite checkpoint persistence.
+- **Approval broker** (upstream guardrail): external-impact action gating with interface adapters.
 - **mem0**: persistent user memory (add/search).
 - **Scheduler + Task services**: background orchestration, wake queue, and artifacts.
 
@@ -90,10 +91,45 @@ Each turn injects live server time + best-known user local time/UTC offset into 
 If the user timezone is unknown, server timezone is used as a fallback until the agent stores a user offset.
 Customer metadata (directive + timezone/offset) is stored in a unified customer profile store.
 
+## External-Impact Approval Model
+
+Approval checks are evaluated at action execution time (tool call precheck), not keyword matching on user text.
+
+- Normal replies/files to the current user session are allowed without approval.
+- Actions with potential external impact (posting, purchases, costly side effects, unknown recipient scope) require approval.
+- Unknown scope is treated as `approval required` (fail-closed).
+
+State machine (`pending_approvals`):
+
+- `pending` -> `approved` (origin user approves)
+- `pending` -> `denied` (origin user denies)
+- `pending` -> `expired` (TTL reached, default 10 minutes)
+- `approved` -> `executed` (single-use execution path)
+
+Rules:
+
+- Only the origin user can approve/deny.
+- Approval tokens are single-use; replay is blocked.
+- Interface routing is same-interface first (Telegram inline buttons), with text-token fallback where needed.
+
+## Failure Behavior
+
+- Guardrail classifier uncertainty/error: requires approval (never auto-allow).
+- Approval store/adapters unavailable: side-effect action fails closed.
+- Execution after approval failing at runtime: approval is not silently retried as a fresh side effect.
+- Timeout/expiry: action is blocked and must be re-requested.
+- Wake/notification failures: event is written to context event store for recovery on next turn.
+
+## Adding External Tools Safely
+
+Use the checklist in [`docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md`](docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md) before adding any new integration that can affect external recipients, incur cost, or mutate third-party systems.
+
 ## Project layout
 
 - `src/opentulpa/agent` — LangGraph runtime (`runtime.py`), state models, and utilities
-- `src/opentulpa/api` — FastAPI app and internal APIs
+- `src/opentulpa/api` — FastAPI app composition and internal APIs
+- `src/opentulpa/api/routes` — Route modules split by concern (health, files, scheduler, tasks, etc.)
+- `src/opentulpa/approvals` — Approval broker, policy, store, and interface adapters
 - `src/opentulpa/interfaces/telegram` — Telegram client/formatter/chat service
 - `src/opentulpa/integrations` — Slack and web-search integrations
 - `src/opentulpa/tasks` — sandbox, task service, wake queue

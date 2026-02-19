@@ -1041,6 +1041,23 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return r.json()
 
     @tool
+    async def guardrail_execute_approved_action(approval_id: str, customer_id: str) -> Any:
+        """Execute a previously approved external-impact action exactly once."""
+        aid = str(approval_id or "").strip()
+        if not aid:
+            return {"error": "guardrail_execute_approved_action requires approval_id"}
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/approvals/execute",
+            json_body={"approval_id": aid, "customer_id": customer_id},
+            timeout=90.0,
+            retries=1,
+        )
+        if r.status_code != 200:
+            return {"error": f"guardrail_execute_approved_action failed: {r.text}"}
+        return r.json()
+
+    @tool
     async def server_time() -> Any:
         """Get server time."""
         now_local = datetime.now().astimezone()
@@ -1088,5 +1105,6 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         "routine_list": routine_list,
         "routine_delete": routine_delete,
         "automation_delete": automation_delete,
+        "guardrail_execute_approved_action": guardrail_execute_approved_action,
         "server_time": server_time,
     }

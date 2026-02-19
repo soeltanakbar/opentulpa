@@ -40,6 +40,16 @@ class Settings(BaseSettings):
         le=300000,
         description="Estimated oldest token span to summarize during compaction.",
     )
+    approvals_db_path: str = Field(
+        default=".opentulpa/pending_approvals.db",
+        description="SQLite path for external-impact pending approvals.",
+    )
+    approvals_ttl_minutes: int = Field(
+        default=10,
+        ge=1,
+        le=120,
+        description="Default expiration window (minutes) for approval challenges.",
+    )
 
     # Telegram
     telegram_bot_token: str | None = Field(default=None, description="Telegram bot token")

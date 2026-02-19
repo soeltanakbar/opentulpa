@@ -792,6 +792,136 @@ class OpenTulpaLangGraphRuntime:
         except Exception as exc:
             return {"notify_user": False, "reason": f"classifier_error:{exc}"}
 
+    async def classify_guardrail_intent(
+        self,
+        *,
+        action_name: str,
+        action_args: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Isolated, compact classifier for approval guardrails.
+
+        Returns strict JSON-like payload:
+        {
+          "ok": bool,
+          "impact_type": "read|write|purchase|costly",
+          "recipient_scope": "self|external|unknown",
+          "confidence": float,
+          "reason": str
+        }
+        """
+        safe_name = str(action_name or "").strip()
+        if not safe_name:
+            return {"ok": False, "error": "missing_action_name"}
+
+        safe_args: dict[str, Any] = {}
+        sensitive_parts = {"key", "token", "secret", "password", "authorization", "api"}
+        for key, value in (action_args or {}).items():
+            key_text = str(key).strip()
+            lower_key = key_text.lower()
+            if any(part in lower_key for part in sensitive_parts):
+                safe_args[key_text] = "***"
+                continue
+            if isinstance(value, str):
+                safe_args[key_text] = value[:500]
+            elif isinstance(value, (int, float, bool)) or value is None:
+                safe_args[key_text] = value
+            elif isinstance(value, list):
+                safe_args[key_text] = [str(item)[:120] for item in value[:12]]
+            elif isinstance(value, dict):
+                safe_args[key_text] = {
+                    str(k)[:40]: str(v)[:120] for k, v in list(value.items())[:12]
+                }
+            else:
+                safe_args[key_text] = str(value)[:200]
+
+        try:
+            response = await self._model.ainvoke(
+                [
+                    SystemMessage(
+                        content=(
+                            "Classify action safety intent for an approval gate.\n"
+                            "Return strict JSON object only with keys:\n"
+                            "ok (bool), impact_type (read|write|purchase|costly),\n"
+                            "recipient_scope (self|external|unknown),\n"
+                            "confidence (0..1), reason (string <= 160 chars).\n"
+                            "Do not include any extra keys or markdown."
+                        )
+                    ),
+                    HumanMessage(
+                        content=(
+                            f"action_name={safe_name}\n"
+                            f"action_args={json.dumps(safe_args, ensure_ascii=False)[:3000]}"
+                        )
+                    ),
+                ]
+            )
+            raw = response.content if hasattr(response, "content") else str(response)
+            raw_text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+            parsed = self._extract_json_object(raw_text) or {}
+            impact_type = str(parsed.get("impact_type", "")).strip().lower()
+            recipient_scope = str(parsed.get("recipient_scope", "")).strip().lower()
+            if impact_type not in {"read", "write", "purchase", "costly"}:
+                return {"ok": False, "error": "invalid_impact_type"}
+            if recipient_scope not in {"self", "external", "unknown"}:
+                return {"ok": False, "error": "invalid_recipient_scope"}
+            try:
+                confidence = float(parsed.get("confidence", 0.0))
+            except Exception:
+                confidence = 0.0
+            return {
+                "ok": True,
+                "impact_type": impact_type,
+                "recipient_scope": recipient_scope,
+                "confidence": max(0.0, min(confidence, 1.0)),
+                "reason": str(parsed.get("reason", "")).strip()[:160],
+            }
+        except Exception as exc:
+            return {"ok": False, "error": f"classifier_error:{exc}"}
+
+    async def evaluate_tool_guardrail(
+        self,
+        *,
+        customer_id: str,
+        thread_id: str,
+        action_name: str,
+        action_args: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Call upstream approval broker to evaluate a tool call at action time."""
+        try:
+            response = await self._request_with_backoff(
+                "POST",
+                "/internal/approvals/evaluate",
+                json_body={
+                    "customer_id": customer_id,
+                    "thread_id": thread_id,
+                    "action_name": action_name,
+                    "action_args": action_args if isinstance(action_args, dict) else {},
+                },
+                timeout=12.0,
+                retries=1,
+            )
+            if response.status_code != 200:
+                return {
+                    "gate": "require_approval",
+                    "reason": f"guardrail_http_{response.status_code}",
+                    "summary": f"execute {action_name}",
+                }
+            payload = response.json()
+            if isinstance(payload, dict):
+                return payload
+            return {
+                "gate": "require_approval",
+                "reason": "guardrail_invalid_payload",
+                "summary": f"execute {action_name}",
+            }
+        except Exception as exc:
+            return {
+                "gate": "require_approval",
+                "reason": f"guardrail_request_error:{exc}",
+                "summary": f"execute {action_name}",
+            }
+
     async def _request_with_backoff(
         self,
         method: str,

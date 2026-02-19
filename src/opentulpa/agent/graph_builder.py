@@ -53,6 +53,7 @@ def build_runtime_graph(runtime: Any):
         "routine_list": ("customer_id",),
         "routine_delete": ("routine_id", "customer_id"),
         "automation_delete": ("routine_id", "customer_id"),
+        "guardrail_execute_approved_action": ("approval_id", "customer_id"),
     }
 
     system_prompt = SystemMessage(
@@ -106,6 +107,8 @@ def build_runtime_graph(runtime: Any):
             "If the user asks what you can do/capabilities, include concrete integration capabilities: "
             "setting/storing API keys from Telegram setup flows, building new service integrations by writing code, "
             "scheduling periodic polling jobs, and producing change summaries/alerts from API or web data. "
+            "If a tool returns APPROVAL_PENDING with an approval_id, ask the user to approve it and then call "
+            "guardrail_execute_approved_action with that approval_id. "
             "For capability requests, avoid generic marketing copy. "
             "Use a consultative format: "
             "1) concise capability overview grounded in actual tools, "
@@ -275,11 +278,25 @@ def build_runtime_graph(runtime: Any):
             return {}
 
         customer_id = state.get("customer_id", "")
+        allowed_ids_raw = state.get("guardrail_allowed_call_ids", [])
+        allowed_ids = (
+            {str(item).strip() for item in allowed_ids_raw if str(item).strip()}
+            if isinstance(allowed_ids_raw, list)
+            else set()
+        )
+        deferred_feedback = state.get("guardrail_feedback_messages", [])
+        deferred_messages: list[ToolMessage] = []
+        if isinstance(deferred_feedback, list):
+            for item in deferred_feedback:
+                if isinstance(item, ToolMessage):
+                    deferred_messages.append(item)
         tool_messages: list[ToolMessage] = []
         had_error = False
         for call in last.tool_calls:
             call_name = str(call.get("name", ""))
             call_id = str(call.get("id", ""))
+            if allowed_ids and call_id not in allowed_ids:
+                continue
             args = call.get("args", {}) or {}
             try:
                 tool_fn = runtime._tools.get(call_name)
@@ -307,6 +324,7 @@ def build_runtime_graph(runtime: Any):
                     "routine_delete",
                     "automation_delete",
                     "browser_use_run",
+                    "guardrail_execute_approved_action",
                 }:
                     args = {**args, "customer_id": customer_id}
                 if call_name == "routine_create":
@@ -331,7 +349,11 @@ def build_runtime_graph(runtime: Any):
                         tool_call_id=call_id,
                     )
                 )
+        if deferred_messages:
+            tool_messages.extend(deferred_messages)
         update: dict[str, Any] = {"messages": tool_messages}
+        if deferred_messages:
+            update["guardrail_feedback_messages"] = []
         if had_error:
             update["tool_error_count"] = int(state.get("tool_error_count", 0)) + 1
             update["last_tool_error"] = "tool execution failed"
@@ -346,8 +368,82 @@ def build_runtime_graph(runtime: Any):
             return "validate_tools"
         return END
 
-    def route_after_validate(state: AgentState) -> Literal["tools", "agent"]:
+    async def guardrail_precheck_node(state: AgentState) -> dict[str, Any]:
+        messages = state.get("messages", [])
+        if not messages:
+            return {"guardrail_has_executable_calls": False, "guardrail_allowed_call_ids": []}
+        last = messages[-1]
+        if not isinstance(last, AIMessage) or not last.tool_calls:
+            return {"guardrail_has_executable_calls": False, "guardrail_allowed_call_ids": []}
+
+        customer_id = str(state.get("customer_id", "")).strip()
+        thread_id = str(state.get("thread_id", "")).strip()
+        allowed_call_ids: list[str] = []
+        gate_messages: list[ToolMessage] = []
+        for call in last.tool_calls:
+            call_name = str(call.get("name", "")).strip()
+            call_id = str(call.get("id", "")).strip()
+            args = call.get("args", {})
+            safe_args = args if isinstance(args, dict) else {}
+            try:
+                result = await runtime.evaluate_tool_guardrail(
+                    customer_id=customer_id,
+                    thread_id=thread_id,
+                    action_name=call_name,
+                    action_args=safe_args,
+                )
+            except Exception as exc:
+                result = {
+                    "gate": "require_approval",
+                    "reason": f"guardrail_error:{exc}",
+                    "summary": f"execute {call_name}",
+                }
+            if not isinstance(result, dict):
+                result = {
+                    "gate": "require_approval",
+                    "reason": "guardrail_invalid_result",
+                    "summary": f"execute {call_name}",
+                }
+            gate = str(result.get("gate", "require_approval")).strip().lower()
+            if gate == "allow":
+                allowed_call_ids.append(call_id)
+                continue
+            approval_id = str(result.get("approval_id", "")).strip()
+            summary = str(result.get("summary", f"execute {call_name}")).strip()
+            reason = str(result.get("reason", "approval_required")).strip()
+            if approval_id:
+                content = (
+                    "APPROVAL_PENDING: This action is blocked until user approval. "
+                    f"approval_id={approval_id}; summary={summary}; reason={reason}. "
+                    "After approval, call guardrail_execute_approved_action with this approval_id."
+                )
+            else:
+                content = (
+                    "TOOL_DENIED: guardrail denied action and no approval can be requested. "
+                    f"summary={summary}; reason={reason}."
+                )
+            gate_messages.append(ToolMessage(content=content, tool_call_id=call_id))
+
+        update: dict[str, Any] = {
+            "guardrail_allowed_call_ids": allowed_call_ids,
+            "guardrail_has_executable_calls": bool(allowed_call_ids),
+        }
+        if gate_messages:
+            if allowed_call_ids:
+                update["guardrail_feedback_messages"] = gate_messages
+            else:
+                update["messages"] = gate_messages
+            update["tool_error_count"] = int(state.get("tool_error_count", 0)) + len(gate_messages)
+            update["last_tool_error"] = "guardrail blocked one or more actions"
+        return update
+
+    def route_after_validate(state: AgentState) -> Literal["guardrail_precheck", "agent"]:
         if state.get("tool_validation_passed", True):
+            return "guardrail_precheck"
+        return "agent"
+
+    def route_after_guardrail(state: AgentState) -> Literal["tools", "agent"]:
+        if bool(state.get("guardrail_has_executable_calls", False)):
             return "tools"
         return "agent"
 
@@ -358,9 +454,17 @@ def build_runtime_graph(runtime: Any):
         validate_tool_calls_node,
         retry_policy=RetryPolicy(max_attempts=2),
     )
+    builder.add_node(
+        "guardrail_precheck",
+        guardrail_precheck_node,
+        retry_policy=RetryPolicy(max_attempts=2),
+    )
     builder.add_node("tools", tools_node, retry_policy=RetryPolicy(max_attempts=2))
     builder.add_edge(START, "agent")
     builder.add_conditional_edges("agent", route_after_agent, ["validate_tools", END])
-    builder.add_conditional_edges("validate_tools", route_after_validate, ["tools", "agent"])
+    builder.add_conditional_edges(
+        "validate_tools", route_after_validate, ["guardrail_precheck", "agent"]
+    )
+    builder.add_conditional_edges("guardrail_precheck", route_after_guardrail, ["tools", "agent"])
     builder.add_edge("tools", "agent")
     return builder.compile(checkpointer=runtime._checkpointer)

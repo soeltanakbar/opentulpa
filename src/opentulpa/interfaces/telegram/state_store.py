@@ -40,6 +40,7 @@ class TelegramStateStore:
                     slots.append(
                         {
                             "chat_id": int(chat_id),
+                            "user_id": slot.get("user_id"),
                             "thread_id": slot.get("thread_id"),
                             "wake_thread_id": slot.get("wake_thread_id"),
                             "customer_id": slot.get("customer_id"),
@@ -55,9 +56,25 @@ class TelegramStateStore:
                             slots.append(
                                 {
                                     "chat_id": cid,
+                                    "user_id": slot.get("user_id"),
                                     "thread_id": slot.get("thread_id"),
                                     "wake_thread_id": slot.get("wake_thread_id"),
                                     "customer_id": slot.get("customer_id"),
                                 }
                             )
         return slots
+
+    def get_session_slot(self, chat_id: int | str) -> dict[str, Any] | None:
+        state = self.load()
+        sessions = state.get("sessions", {})
+        key = str(chat_id)
+        slot = sessions.get(key) if isinstance(sessions, dict) else None
+        if not isinstance(slot, dict):
+            return None
+        return {
+            "chat_id": int(chat_id),
+            "user_id": slot.get("user_id"),
+            "thread_id": slot.get("thread_id"),
+            "wake_thread_id": slot.get("wake_thread_id"),
+            "customer_id": slot.get("customer_id"),
+        }

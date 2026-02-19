@@ -96,12 +96,51 @@ class TelegramClient:
         chat_id: int | str,
         text: str,
         parse_mode: str | None = "HTML",
+        reply_markup: dict[str, Any] | None = None,
     ) -> bool:
         final_text, final_mode = prepare_text_and_mode(text, parse_mode)
         payload: dict[str, Any] = {"chat_id": chat_id, "text": final_text}
         if final_mode:
             payload["parse_mode"] = final_mode
+        if isinstance(reply_markup, dict):
+            payload["reply_markup"] = reply_markup
         data = await self._post("sendMessage", payload)
+        return bool(data)
+
+    async def edit_message_text(
+        self,
+        *,
+        chat_id: int | str,
+        message_id: int,
+        text: str,
+        parse_mode: str | None = "HTML",
+        reply_markup: dict[str, Any] | None = None,
+    ) -> bool:
+        final_text, final_mode = prepare_text_and_mode(text, parse_mode)
+        payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": final_text}
+        if final_mode:
+            payload["parse_mode"] = final_mode
+        if isinstance(reply_markup, dict):
+            payload["reply_markup"] = reply_markup
+        data = await self._post("editMessageText", payload)
+        return bool(data)
+
+    async def answer_callback_query(
+        self,
+        *,
+        callback_query_id: str,
+        text: str | None = None,
+        show_alert: bool = False,
+    ) -> bool:
+        payload: dict[str, Any] = {
+            "callback_query_id": str(callback_query_id or "").strip(),
+            "show_alert": bool(show_alert),
+        }
+        if text:
+            payload["text"] = str(text).strip()[:180]
+        if not payload["callback_query_id"]:
+            return False
+        data = await self._post("answerCallbackQuery", payload)
         return bool(data)
 
     async def upsert_stream_message(
@@ -112,6 +151,7 @@ class TelegramClient:
         message_id: int | None = None,
         parse_mode: str | None = None,
         allow_fallback_send: bool = True,
+        reply_markup: dict[str, Any] | None = None,
     ) -> int | None:
         final_text, final_mode = prepare_text_and_mode(text, parse_mode)
         if not final_text:
@@ -121,6 +161,8 @@ class TelegramClient:
             payload: dict[str, Any] = {"chat_id": chat_id, "text": final_text}
             if final_mode:
                 payload["parse_mode"] = final_mode
+            if isinstance(reply_markup, dict):
+                payload["reply_markup"] = reply_markup
             data = await self._post("sendMessage", payload)
             if not data:
                 return None
@@ -134,6 +176,8 @@ class TelegramClient:
         payload = {"chat_id": chat_id, "message_id": message_id, "text": final_text}
         if final_mode:
             payload["parse_mode"] = final_mode
+        if isinstance(reply_markup, dict):
+            payload["reply_markup"] = reply_markup
         data = await self._post("editMessageText", payload)
         if data:
             return message_id
@@ -142,6 +186,8 @@ class TelegramClient:
         fallback_payload: dict[str, Any] = {"chat_id": chat_id, "text": final_text}
         if final_mode:
             fallback_payload["parse_mode"] = final_mode
+        if isinstance(reply_markup, dict):
+            fallback_payload["reply_markup"] = reply_markup
         fallback_data = await self._post("sendMessage", fallback_payload)
         if not fallback_data:
             return message_id
@@ -243,3 +289,22 @@ def parse_telegram_update(body: dict) -> tuple[int | None, int | None, str | Non
         return chat_id, user_id, text
     except Exception:
         return None, None, None
+
+
+def parse_telegram_callback_query(
+    body: dict[str, Any],
+) -> tuple[str | None, int | None, int | None, str | None, int | None]:
+    """Extract callback query metadata: (callback_id, user_id, chat_id, data, message_id)."""
+    try:
+        callback = body.get("callback_query")
+        if not isinstance(callback, dict):
+            return None, None, None, None, None
+        callback_id = str(callback.get("id", "")).strip() or None
+        user_id = callback.get("from", {}).get("id")
+        message = callback.get("message") if isinstance(callback.get("message"), dict) else {}
+        chat_id = message.get("chat", {}).get("id")
+        message_id = message.get("message_id")
+        data = str(callback.get("data", "")).strip() or None
+        return callback_id, user_id, chat_id, data, message_id if isinstance(message_id, int) else None
+    except Exception:
+        return None, None, None, None, None
