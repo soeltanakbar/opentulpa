@@ -1,0 +1,43 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: openlit-clickhouse
+    restart: unless-stopped
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      - CLICKHOUSE_DB=${OPENLIT_CLICKHOUSE_DB:-default}
+      - CLICKHOUSE_USER=${OPENLIT_CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${OPENLIT_CLICKHOUSE_PASSWORD:-}
+    volumes:
+      - openlit_clickhouse_data:/var/lib/clickhouse
+      - openlit_clickhouse_logs:/var/log/clickhouse-server
+
+  openlit:
+    image: ghcr.io/openlit/openlit:latest
+    container_name: openlit
+    restart: unless-stopped
+    depends_on:
+      - clickhouse
+    env_file:
+      - .env
+    environment:
+      - OPENLIT_AUTH_DISABLED=${OPENLIT_AUTH_DISABLED:-true}
+      - OPENLIT_SMTP_ENABLED=${OPENLIT_SMTP_ENABLED:-false}
+      - OPENLIT_CLICKHOUSE_HOST=${OPENLIT_CLICKHOUSE_HOST:-clickhouse}
+      - OPENLIT_CLICKHOUSE_PORT=${OPENLIT_CLICKHOUSE_PORT:-8123}
+      - OPENLIT_CLICKHOUSE_USER=${OPENLIT_CLICKHOUSE_USER:-default}
+      - OPENLIT_CLICKHOUSE_PASSWORD=${OPENLIT_CLICKHOUSE_PASSWORD:-}
+      - OPENLIT_CLICKHOUSE_DATABASE=${OPENLIT_CLICKHOUSE_DB:-default}
+      - OPENLIT_CLICKHOUSE_SSL=${OPENLIT_CLICKHOUSE_SSL:-false}
+      - OPENLIT_INITDB_CLICKHOUSE_URL=${OPENLIT_INITDB_CLICKHOUSE_URL:-clickhouse://default:@clickhouse:8123/default}
+    ports:
+      - "3000:3000"
+      - "8080:8080"
+      - "4318:4318"
+
+volumes:
+  openlit_clickhouse_data:
+  openlit_clickhouse_logs:
+

@@ -1,0 +1,33 @@
+# Python caches/build
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+*.egg-info/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Runtime state
+.opentulpa/
+*.log
+*.log.old
+
+# Agent-generated/user runtime artifacts
+tulpa_stuff/.tulpa_catalog.json
+tulpa_stuff/artifacts/
+tulpa_stuff/*.py
+!tulpa_stuff/__init__.py
+docs/SCRATCHPAD.md
+
+# IDE / OS
+.DS_Store
+.cursor/
+.codex/

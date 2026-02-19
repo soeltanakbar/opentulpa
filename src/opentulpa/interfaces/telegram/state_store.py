@@ -1,0 +1,63 @@
+"""Durable Telegram session/admin state storage."""
+
+from __future__ import annotations
+
+import json
+from contextlib import suppress
+from pathlib import Path
+from typing import Any
+
+
+class TelegramStateStore:
+    def __init__(self, state_path: Path) -> None:
+        self.state_path = state_path.resolve()
+
+    @staticmethod
+    def _default_state() -> dict[str, Any]:
+        return {"admin_user_id": None, "sessions": {}, "pending_key_by_chat": {}}
+
+    def load(self) -> dict[str, Any]:
+        if not self.state_path.exists():
+            return self._default_state()
+        try:
+            return json.loads(self.state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return self._default_state()
+
+    def save(self, state: dict[str, Any]) -> None:
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        with suppress(Exception):
+            self.state_path.chmod(0o600)
+
+    def find_session_slots(self, customer_id: str) -> list[dict[str, Any]]:
+        state = self.load()
+        sessions = state.get("sessions", {})
+        slots: list[dict[str, Any]] = []
+        for chat_id, slot in sessions.items():
+            if str(slot.get("customer_id", "")) == customer_id:
+                with suppress(Exception):
+                    slots.append(
+                        {
+                            "chat_id": int(chat_id),
+                            "thread_id": slot.get("thread_id"),
+                            "wake_thread_id": slot.get("wake_thread_id"),
+                            "customer_id": slot.get("customer_id"),
+                        }
+                    )
+        if customer_id.startswith("telegram_"):
+            uid = customer_id.removeprefix("telegram_").strip()
+            for chat_id, slot in sessions.items():
+                if str(slot.get("user_id", "")) == uid:
+                    with suppress(Exception):
+                        cid = int(chat_id)
+                        if not any(s.get("chat_id") == cid for s in slots):
+                            slots.append(
+                                {
+                                    "chat_id": cid,
+                                    "thread_id": slot.get("thread_id"),
+                                    "wake_thread_id": slot.get("wake_thread_id"),
+                                    "customer_id": slot.get("customer_id"),
+                                }
+                            )
+        return slots

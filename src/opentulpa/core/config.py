@@ -1,0 +1,99 @@
+"""Configuration from environment."""
+
+from functools import lru_cache
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """App settings from env."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # Host
+    host: str = Field(default="0.0.0.0", description="Bind host")
+    port: int = Field(default=8000, ge=1, le=65535, description="FastAPI port")
+    agent_checkpoint_db_path: str = Field(
+        default=".opentulpa/langgraph_checkpoints.sqlite",
+        description="SQLite path for LangGraph thread checkpoints.",
+    )
+    agent_recursion_limit: int = Field(
+        default=30,
+        ge=5,
+        le=200,
+        description="Maximum LangGraph steps per turn.",
+    )
+    agent_context_token_limit: int = Field(
+        default=250000,
+        ge=50000,
+        le=1000000,
+        description="Estimated token ceiling before thread context compaction.",
+    )
+    agent_context_rollup_tokens: int = Field(
+        default=100000,
+        ge=10000,
+        le=300000,
+        description="Estimated oldest token span to summarize during compaction.",
+    )
+
+    # Telegram
+    telegram_bot_token: str | None = Field(default=None, description="Telegram bot token")
+    telegram_allowed_usernames: str | None = Field(
+        default=None,
+        description="Optional CSV allowlist of Telegram usernames (without @).",
+    )
+    telegram_allowed_user_ids: str | None = Field(
+        default=None,
+        description="Optional CSV allowlist of Telegram numeric user IDs.",
+    )
+
+    # Slack (for Slack skill: list channels, read history, post)
+    slack_bot_token: str | None = Field(
+        default=None, description="Slack Bot OAuth token (xoxb-...)"
+    )
+    telegram_webhook_secret: str | None = Field(
+        default=None,
+        description="Optional secret for webhook path",
+    )
+
+    # Memory (mem0)
+    mem0_user_id: str = Field(default="default", description="Default user id for mem0")
+    mem0_qdrant_path: str = Field(
+        default=".opentulpa/qdrant",
+        description="Local path for embedded Qdrant vector store used by mem0.",
+    )
+    mem0_qdrant_on_disk: bool = Field(
+        default=True,
+        description="Persist Qdrant vectors on disk (recommended true for durability).",
+    )
+
+    # LLM: used for Parlant (OpenRouter) and mem0 (Gemini). Single model for all agent/LLM calls.
+    openrouter_api_key: str | None = Field(
+        default=None,
+        description="OpenRouter API key (loaded from OPENROUTER_API_KEY in env/.env).",
+    )
+    openrouter_base_url: str = Field(
+        default="https://openrouter.ai/api/v1",
+        description="OpenRouter API base URL for OpenAI-compatible clients (mem0).",
+    )
+    llm_model: str = Field(
+        default="gemini-3-flash-preview",
+        description="Model id: for OpenRouter use 'google/<this>'; for mem0 Gemini use as-is.",
+    )
+    openrouter_embedding_model: str = Field(
+        default="openai/text-embedding-3-small",
+        description="Embedding model id for mem0 via OpenRouter embeddings API.",
+    )
+
+    # OpenRouter: OPENROUTER_API_KEY required. OPENROUTER_MODEL set from llm_model (google/<llm_model>).
+    # mem0 is configured via OpenRouter base URL + key (OpenAI-compatible endpoints).
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

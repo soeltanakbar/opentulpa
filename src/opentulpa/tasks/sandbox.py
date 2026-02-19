@@ -1,0 +1,455 @@
+"""Sandboxed file and terminal operations for task execution."""
+
+from __future__ import annotations
+
+import ast
+import contextlib
+import os
+import shlex
+import subprocess
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+TULPA_STUFF_DIR = (PROJECT_ROOT / "tulpa_stuff").resolve()
+INTEGRATIONS_DIR = (PACKAGE_ROOT / "integrations").resolve()
+INTERFACES_DIR = (PACKAGE_ROOT / "interfaces").resolve()
+TOOLS_DIR = (PACKAGE_ROOT / "tools").resolve()
+SKILLS_DIR = (PACKAGE_ROOT / "skills").resolve()
+REPO_VENV_DIR = (PROJECT_ROOT / ".venv").resolve()
+ARTIFACTS_ROOT = (TULPA_STUFF_DIR / "artifacts").resolve()
+CATALOG_PATH = (TULPA_STUFF_DIR / ".tulpa_catalog.json").resolve()
+CATALOG_README_PATH = (TULPA_STUFF_DIR / "README.md").resolve()
+DEBUG_LOG_PATH = (PROJECT_ROOT / ".cursor" / "debug.log").resolve()
+
+ALLOWED_TERMINAL_DIRS = {
+    "tulpa_stuff": TULPA_STUFF_DIR,
+    "integrations": INTEGRATIONS_DIR,
+    "interfaces": INTERFACES_DIR,
+    "tools": TOOLS_DIR,
+    "skills": SKILLS_DIR,
+    "opentulpa": PACKAGE_ROOT,
+}
+
+ALLOWED_TERMINAL_COMMANDS = {
+    "wget",
+    "curl",
+    "python",
+    "python3",
+    "uv",
+    "pip",
+    "pip3",
+    "ls",
+    "pwd",
+    "mkdir",
+    "touch",
+    "cp",
+    "mv",
+    "sed",
+    "awk",
+    "rg",
+    "pytest",
+    "sqlite3",
+}
+
+
+def _is_tulpa_router_module(path: Path) -> bool:
+    return (
+        path.suffix == ".py"
+        and is_within(path, TULPA_STUFF_DIR)
+        and path.name != "__init__.py"
+        and not path.name.startswith("_")
+    )
+
+
+def _debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    try:
+        payload = {
+            "runId": "review-capability",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json_dumps(payload) + "\n")
+    except Exception:
+        pass
+
+
+def is_within(path: Path, root: Path) -> bool:
+    path_r = path.resolve()
+    root_r = root.resolve()
+    return path_r == root_r or root_r in path_r.parents
+
+
+def resolve_allowed_write_path(relative_path: str) -> Path:
+    rel = relative_path.strip()
+    if not rel:
+        raise ValueError("path is required")
+    if Path(rel).is_absolute():
+        raise ValueError("path must be relative")
+
+    target = (PROJECT_ROOT / rel).resolve()
+    if not (
+        is_within(target, TULPA_STUFF_DIR)
+        or is_within(target, INTEGRATIONS_DIR)
+        or is_within(target, INTERFACES_DIR)
+        or is_within(target, TOOLS_DIR)
+        or is_within(target, SKILLS_DIR)
+    ):
+        raise ValueError(
+            "path must be under tulpa_stuff/, src/opentulpa/integrations/, src/opentulpa/interfaces/, "
+            "src/opentulpa/tools/, or src/opentulpa/skills/"
+        )
+    return target
+
+
+def write_file(relative_path: str, content: str) -> Path:
+    target = resolve_allowed_write_path(relative_path)
+    previous_content: str | None = None
+    had_existing = target.exists()
+    if had_existing and target.is_file():
+        previous_content = target.read_text(encoding="utf-8", errors="replace")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(str(content), encoding="utf-8")
+    try:
+        validate_generated_file(relative_path)
+    except Exception:
+        if had_existing and previous_content is not None:
+            target.write_text(previous_content, encoding="utf-8")
+        else:
+            with contextlib.suppress(FileNotFoundError):
+                target.unlink()
+        raise
+    _record_catalog_path(target)
+    return target
+
+
+def _extract_router_names(tree: ast.Module) -> set[str]:
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                names.add(bound)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+    return names
+
+
+def validate_generated_file(relative_path: str) -> dict[str, Any]:
+    rel = str(relative_path or "").strip()
+    if not rel:
+        raise ValueError("path is required")
+    target = resolve_allowed_write_path(rel)
+    if not target.exists():
+        raise ValueError("file not found")
+    if target.is_dir():
+        raise ValueError("path is a directory")
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "path": str(target.relative_to(PROJECT_ROOT)),
+        "python_syntax_ok": None,
+        "router_contract_ok": None,
+    }
+    if target.suffix != ".py":
+        return result
+
+    text = target.read_text(encoding="utf-8", errors="replace")
+    try:
+        tree = ast.parse(text, filename=str(target))
+        compile(text, str(target), "exec")
+    except SyntaxError as exc:
+        raise ValueError(f"Python syntax validation failed: {exc.msg} (line {exc.lineno})") from exc
+    result["python_syntax_ok"] = True
+
+    if _is_tulpa_router_module(target):
+        names = _extract_router_names(tree)
+        if "router" not in names:
+            raise ValueError(
+                "tulpa_stuff module must define top-level 'router' for FastAPI mounting. "
+                "Use: from fastapi import APIRouter; router = APIRouter()."
+            )
+        result["router_contract_ok"] = True
+    return result
+
+
+def read_file(relative_path: str, max_chars: int = 12000) -> str:
+    rel = relative_path.strip()
+    if not rel:
+        raise ValueError("path is required")
+    if Path(rel).is_absolute():
+        raise ValueError("path must be relative")
+    target = (PROJECT_ROOT / rel).resolve()
+    if not (
+        is_within(target, TULPA_STUFF_DIR)
+        or is_within(target, INTEGRATIONS_DIR)
+        or is_within(target, INTERFACES_DIR)
+        or is_within(target, TOOLS_DIR)
+        or is_within(target, SKILLS_DIR)
+    ):
+        raise ValueError("path outside allowed roots")
+    if not target.exists():
+        raise ValueError("file not found")
+    if target.is_dir():
+        raise ValueError("path is a directory")
+    return target.read_text(encoding="utf-8", errors="replace")[:max_chars]
+
+
+def task_artifact_dir(task_id: str) -> Path:
+    path = (ARTIFACTS_ROOT / task_id).resolve()
+    if not is_within(path, ARTIFACTS_ROOT):
+        raise ValueError("invalid task_id for artifact path")
+    path.mkdir(parents=True, exist_ok=True)
+    _record_catalog_path(path / "events.jsonl", kind="artifact_log")
+    return path
+
+
+def list_artifacts(task_id: str) -> list[dict[str, Any]]:
+    root = task_artifact_dir(task_id)
+    files: list[dict[str, Any]] = []
+    for file in sorted(root.rglob("*")):
+        if file.is_file():
+            files.append(
+                {
+                    "path": str(file.relative_to(PROJECT_ROOT)),
+                    "size_bytes": file.stat().st_size,
+                    "name": file.name,
+                }
+            )
+    return files
+
+
+def get_tulpa_catalog() -> dict[str, Any]:
+    if not CATALOG_PATH.exists():
+        _write_catalog(_default_catalog())
+    try:
+        return json_load(CATALOG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return _default_catalog()
+
+
+def append_task_event_log(task_id: str, event: dict[str, Any]) -> str:
+    root = task_artifact_dir(task_id)
+    log_file = (root / "events.jsonl").resolve()
+    if not is_within(log_file, ARTIFACTS_ROOT):
+        raise ValueError("invalid task event log path")
+    with log_file.open("a", encoding="utf-8") as f:
+        f.write(json_dumps(event) + "\n")
+    _record_catalog_path(log_file, kind="artifact_log")
+    return str(log_file.relative_to(PROJECT_ROOT))
+
+
+def run_terminal(
+    command: str,
+    working_dir: str,
+    timeout_seconds: int = 90,
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    cmd = str(command).strip()
+    if not cmd:
+        raise ValueError("command is required")
+    if working_dir not in ALLOWED_TERMINAL_DIRS:
+        raise ValueError(
+            "working_dir must be one of: " + ", ".join(sorted(ALLOWED_TERMINAL_DIRS.keys()))
+        )
+    try:
+        parts = shlex.split(cmd)
+    except ValueError as exc:
+        raise ValueError("invalid command syntax") from exc
+    if not parts:
+        raise ValueError("command is required")
+    # region agent log
+    _debug_log(
+        hypothesis_id="H1",
+        location="tasks/sandbox.py:run_terminal",
+        message="terminal_command_received",
+        data={
+            "working_dir": working_dir,
+            "command_bin": parts[0],
+            "timeout_seconds": timeout_seconds,
+        },
+    )
+    # endregion
+    if parts[0] not in ALLOWED_TERMINAL_COMMANDS:
+        # region agent log
+        _debug_log(
+            hypothesis_id="H1",
+            location="tasks/sandbox.py:run_terminal",
+            message="terminal_command_rejected",
+            data={"working_dir": working_dir, "command_bin": parts[0], "reason": "not_allowlisted"},
+        )
+        # endregion
+        raise PermissionError(f"command '{parts[0]}' is not allowed")
+    if not REPO_VENV_DIR.exists():
+        # region agent log
+        _debug_log(
+            hypothesis_id="H4",
+            location="tasks/sandbox.py:run_terminal",
+            message="venv_missing",
+            data={"venv_path": str(REPO_VENV_DIR.relative_to(PROJECT_ROOT))},
+        )
+        # endregion
+        raise RuntimeError(
+            "Repository virtual environment not found at .venv. Run 'uv sync' first."
+        )
+
+    cwd = ALLOWED_TERMINAL_DIRS[working_dir]
+    cwd.mkdir(parents=True, exist_ok=True)
+    run_env = os.environ.copy()
+    run_env["VIRTUAL_ENV"] = str(REPO_VENV_DIR)
+    run_env["PATH"] = f"{REPO_VENV_DIR / 'bin'}:{run_env.get('PATH', '')}"
+    if extra_env:
+        run_env.update(extra_env)
+
+    try:
+        proc = subprocess.run(
+            parts,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            env=run_env,
+            timeout=max(1, min(int(timeout_seconds), 300)),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError("command timed out") from exc
+
+    result = {
+        "ok": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "stdout": (proc.stdout or "")[-12000:],
+        "stderr": (proc.stderr or "")[-12000:],
+        "cwd": str(cwd.relative_to(PROJECT_ROOT)),
+        "venv": str(REPO_VENV_DIR.relative_to(PROJECT_ROOT)),
+    }
+    # region agent log
+    _debug_log(
+        hypothesis_id="H1",
+        location="tasks/sandbox.py:run_terminal",
+        message="terminal_command_finished",
+        data={
+            "working_dir": working_dir,
+            "command_bin": parts[0],
+            "ok": result["ok"],
+            "returncode": result["returncode"],
+        },
+    )
+    # endregion
+    return result
+
+
+def _default_catalog() -> dict[str, Any]:
+    return {
+        "generated_at": _utc_now(),
+        "roots": {
+            "tulpa_stuff": "tulpa_stuff",
+            "artifacts": "tulpa_stuff/artifacts",
+            "integrations": "src/opentulpa/integrations",
+            "interfaces": "src/opentulpa/interfaces",
+            "tools": "src/opentulpa/tools",
+            "skills": "src/opentulpa/skills",
+        },
+        "entries": [],
+    }
+
+
+def _category_for_path(path: Path) -> str:
+    if is_within(path, ARTIFACTS_ROOT):
+        return "artifact"
+    if is_within(path, TULPA_STUFF_DIR):
+        return "tulpa_stuff"
+    if is_within(path, INTEGRATIONS_DIR):
+        return "integration"
+    if is_within(path, INTERFACES_DIR):
+        return "interface"
+    if is_within(path, TOOLS_DIR):
+        return "tool"
+    if is_within(path, SKILLS_DIR):
+        return "skill"
+    return "other"
+
+
+def _record_catalog_path(path: Path, kind: str | None = None) -> None:
+    target = path.resolve()
+    rel = str(target.relative_to(PROJECT_ROOT)) if is_within(target, PROJECT_ROOT) else str(target)
+    catalog = get_tulpa_catalog()
+    entries = catalog.get("entries", [])
+    now = _utc_now()
+    category = kind or _category_for_path(target)
+    replaced = False
+    for entry in entries:
+        if entry.get("path") == rel:
+            entry["updated_at"] = now
+            entry["kind"] = category
+            replaced = True
+            break
+    if not replaced:
+        entries.append({"path": rel, "kind": category, "updated_at": now})
+    entries.sort(key=lambda e: e.get("updated_at", ""), reverse=True)
+    catalog["entries"] = entries[:5000]
+    catalog["generated_at"] = now
+    _write_catalog(catalog)
+    _write_catalog_readme(catalog)
+
+
+def _write_catalog(catalog: dict[str, Any]) -> None:
+    TULPA_STUFF_DIR.mkdir(parents=True, exist_ok=True)
+    CATALOG_PATH.write_text(json_dumps(catalog, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_catalog_readme(catalog: dict[str, Any]) -> None:
+    lines = [
+        "# Tulpa Stuff Catalog",
+        "",
+        "Auto-generated index of instruments, skills, integration files, and artifacts.",
+        "",
+        f"Generated: {catalog.get('generated_at')}",
+        "",
+        "## Roots",
+        "",
+    ]
+    roots = catalog.get("roots", {})
+    for key, value in roots.items():
+        lines.append(f"- `{key}` -> `{value}`")
+    lines.extend(["", "## Recent Entries", ""])
+    entries = catalog.get("entries", [])[:200]
+    if not entries:
+        lines.append("- (no entries yet)")
+    else:
+        for entry in entries:
+            lines.append(
+                f"- `{entry.get('path')}` ({entry.get('kind')}) updated `{entry.get('updated_at')}`"
+            )
+    CATALOG_README_PATH.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def json_dumps(value: Any, indent: int | None = None) -> str:
+    import json
+
+    if indent is None:
+        return json.dumps(value, ensure_ascii=False)
+    return json.dumps(value, indent=indent, ensure_ascii=False)
+
+
+def json_load(value: str) -> Any:
+    import json
+
+    return json.loads(value)
