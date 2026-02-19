@@ -1,9 +1,13 @@
 """FastAPI application: health, internal API, Telegram webhook, and agent runtime."""
 
 import logging
+import mimetypes
+import re
 from contextlib import asynccontextmanager, suppress
 from typing import Any
+from urllib.parse import unquote, urlparse
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
@@ -11,8 +15,8 @@ from opentulpa.api.tulpa_loader import TulpaRouterLoader
 from opentulpa.context.customer_profiles import CustomerProfileService
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.context.service import EventContextService
-from opentulpa.core.ids import new_short_id
 from opentulpa.core.config import get_settings
+from opentulpa.core.ids import new_short_id
 from opentulpa.integrations.slack_client import (
     grant_slack_write_consent,
     has_slack_write_consent,
@@ -28,6 +32,9 @@ from opentulpa.tasks.sandbox import (
     ALLOWED_TERMINAL_DIRS,
     PROJECT_ROOT,
     get_tulpa_catalog,
+)
+from opentulpa.tasks.sandbox import (
+    delete_file as sandbox_delete_file,
 )
 from opentulpa.tasks.sandbox import (
     read_file as sandbox_read_file,
@@ -158,6 +165,119 @@ def _sanitize_uploaded_file_record(
         excerpt = str(record.get("text_excerpt", "") or "")
         clean["text_excerpt"] = excerpt[:max_excerpt_chars]
     return clean
+
+
+def _normalize_cleanup_paths(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        path = str(item or "").strip()
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        out.append(path)
+    return out
+
+
+def _collect_routine_cleanup_paths(payload: dict[str, Any]) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    candidates: list[str] = []
+    list_keys = ("cleanup_paths", "script_paths", "file_paths")
+    scalar_keys = ("cleanup_path", "script_path", "file_path")
+    for key in list_keys:
+        candidates.extend(_normalize_cleanup_paths(payload.get(key)))
+    for key in scalar_keys:
+        raw = str(payload.get(key, "")).strip()
+        if raw:
+            candidates.append(raw)
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in candidates:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _safe_telegram_filename(name: str, *, fallback: str = "image.jpg") -> str:
+    raw = str(name or "").strip()
+    if not raw:
+        return fallback
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).strip("._")
+    return (safe or fallback)[:180]
+
+
+def _infer_image_filename(image_url: str, content_type: str) -> str:
+    parsed = urlparse(image_url)
+    candidate = unquote(str(parsed.path or "").split("/")[-1]).strip()
+    safe = _safe_telegram_filename(candidate, fallback="")
+    if safe and "." in safe:
+        return safe
+    ext = mimetypes.guess_extension(str(content_type or "").strip().lower()) or ".jpg"
+    return _safe_telegram_filename(f"image{ext}")
+
+
+async def _download_image_from_web_url(
+    image_url: str,
+    *,
+    max_bytes: int = 10_000_000,
+) -> dict[str, Any]:
+    raw_url = str(image_url or "").strip()
+    parsed = urlparse(raw_url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("url must start with http:// or https://")
+
+    safe_limit = max(250_000, min(int(max_bytes), 25_000_000))
+    timeout = httpx.Timeout(45.0, connect=10.0, read=45.0)
+    headers = {"User-Agent": "OpenTulpa/0.1 (+send-web-image)"}
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
+        try:
+            head = await client.head(raw_url)
+            if head.status_code < 400:
+                head_type = str(head.headers.get("content-type", "")).split(";")[0].strip().lower()
+                if head_type and not head_type.startswith("image/"):
+                    raise ValueError(f"url does not point to an image (content-type={head_type})")
+                head_len = str(head.headers.get("content-length", "")).strip()
+                if head_len.isdigit() and int(head_len) > safe_limit:
+                    raise ValueError(f"image too large ({head_len} bytes > {safe_limit} bytes)")
+        except ValueError:
+            raise
+        except Exception:
+            # Some origins reject HEAD; proceed with GET validation.
+            pass
+
+        async with client.stream("GET", raw_url) as resp:
+            if resp.status_code >= 400:
+                raise ValueError(f"image fetch failed: HTTP {resp.status_code}")
+            ctype = str(resp.headers.get("content-type", "")).split(";")[0].strip().lower()
+            if not ctype.startswith("image/"):
+                raise ValueError(f"url does not point to an image (content-type={ctype or 'unknown'})")
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in resp.aiter_bytes():
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > safe_limit:
+                    raise ValueError(f"image too large (>{safe_limit} bytes)")
+                chunks.append(chunk)
+            raw_bytes = b"".join(chunks)
+            if not raw_bytes:
+                raise ValueError("image fetch returned empty body")
+            final_url = str(resp.url)
+
+    filename = _infer_image_filename(final_url, ctype)
+    return {
+        "raw_bytes": raw_bytes,
+        "content_type": ctype,
+        "filename": filename,
+        "final_url": final_url,
+        "size_bytes": len(raw_bytes),
+    }
 
 
 def create_app(
@@ -505,6 +625,60 @@ def create_app(
             return JSONResponse(status_code=502, content={"detail": "telegram send failed"})
         return {"ok": True, "file_id": file_id, "chat_id": chat_id}
 
+    @app.post("/internal/files/send_web_image")
+    async def internal_files_send_web_image(request: Request) -> Any:
+        body = await request.json()
+        customer_id = str(body.get("customer_id", "")).strip()
+        image_url = str(body.get("url", "")).strip()
+        caption_raw = body.get("caption")
+        caption = str(caption_raw).strip() if caption_raw is not None else None
+        caption = caption or None
+        max_bytes = int(body.get("max_bytes", 10_000_000))
+
+        if not settings.telegram_bot_token:
+            return JSONResponse(status_code=501, content={"detail": "Telegram not configured"})
+        if not customer_id or not image_url:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "customer_id and url are required"},
+            )
+
+        chat_id: Any = None
+        slots = _get_telegram_chat().find_session_slots(customer_id)
+        if slots:
+            chat_id = slots[0].get("chat_id")
+        if chat_id is None:
+            return JSONResponse(status_code=404, content={"detail": "no chat found for customer"})
+
+        try:
+            downloaded = await _download_image_from_web_url(
+                image_url,
+                max_bytes=max_bytes,
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"detail": str(exc)})
+        except Exception as exc:
+            return JSONResponse(status_code=502, content={"detail": f"image fetch failed: {exc}"})
+
+        sent = await _get_telegram_client().send_file(
+            chat_id=chat_id,
+            filename=str(downloaded["filename"]),
+            raw_bytes=downloaded["raw_bytes"],
+            kind="animation" if str(downloaded["content_type"]).strip().lower() == "image/gif" else "photo",
+            mime_type=str(downloaded["content_type"]),
+            caption=caption,
+            parse_mode="HTML",
+        )
+        if not sent:
+            return JSONResponse(status_code=502, content={"detail": "telegram send failed"})
+        return {
+            "ok": True,
+            "chat_id": chat_id,
+            "url": str(downloaded["final_url"]),
+            "mime_type": str(downloaded["content_type"]),
+            "size_bytes": int(downloaded["size_bytes"]),
+        }
+
     @app.post("/internal/files/analyze")
     async def internal_files_analyze(request: Request) -> Any:
         vault = _get_file_vault()
@@ -752,9 +926,16 @@ def create_app(
         return {"ok": True, "id": rid}
 
     @app.get("/internal/scheduler/routines")
-    async def internal_scheduler_list_routines() -> Any:
+    async def internal_scheduler_list_routines(customer_id: str | None = None) -> Any:
         sched = _get_scheduler()
         routines = sched.list_routines()
+        cid = str(customer_id or "").strip()
+        if cid:
+            routines = [
+                r
+                for r in routines
+                if str((r.payload or {}).get("customer_id", "")).strip() == cid
+            ]
         return {
             "routines": [
                 {
@@ -769,10 +950,112 @@ def create_app(
         }
 
     @app.delete("/internal/scheduler/routine/{routine_id}")
-    async def internal_scheduler_remove_routine(routine_id: str) -> Any:
+    async def internal_scheduler_remove_routine(
+        routine_id: str,
+        customer_id: str | None = None,
+    ) -> Any:
         sched = _get_scheduler()
+        cid = str(customer_id or "").strip()
+        if cid:
+            routine = sched.get_routine(routine_id)
+            if routine is None:
+                return {"ok": False}
+            owner = str((routine.payload or {}).get("customer_id", "")).strip()
+            if owner != cid:
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "routine does not belong to this customer_id"},
+                )
         ok = sched.remove_routine(routine_id)
         return {"ok": ok}
+
+    @app.post("/internal/scheduler/routine/delete_with_assets")
+    async def internal_scheduler_remove_routine_with_assets(request: Request) -> Any:
+        sched = _get_scheduler()
+        body = await request.json()
+        customer_id = str(body.get("customer_id", "")).strip()
+        if not customer_id:
+            return JSONResponse(status_code=400, content={"detail": "customer_id is required"})
+
+        routine_id = str(body.get("routine_id", "")).strip()
+        name = str(body.get("name", "")).strip()
+        remove_all_matches = bool(body.get("remove_all_matches", False))
+        delete_files = bool(body.get("delete_files", True))
+        extra_cleanup_paths = _normalize_cleanup_paths(body.get("cleanup_paths"))
+
+        routines = [
+            r
+            for r in sched.list_routines()
+            if str((r.payload or {}).get("customer_id", "")).strip() == customer_id
+        ]
+        if routine_id:
+            matched = [r for r in routines if r.id == routine_id]
+        elif name:
+            name_cf = name.strip().casefold()
+            matched = [r for r in routines if r.name.strip().casefold() == name_cf]
+        else:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "routine_id or name is required"},
+            )
+
+        if not matched:
+            return JSONResponse(status_code=404, content={"detail": "routine not found"})
+        if len(matched) > 1 and not remove_all_matches:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "multiple routines matched; set remove_all_matches=true",
+                    "matched_routines": [
+                        {"id": r.id, "name": r.name, "schedule": r.schedule} for r in matched
+                    ],
+                },
+            )
+
+        deleted_routines: list[dict[str, Any]] = []
+        failed_routines: list[dict[str, Any]] = []
+        deleted_files: list[dict[str, Any]] = []
+        failed_files: list[dict[str, Any]] = []
+
+        for routine in matched:
+            ok = sched.remove_routine(routine.id)
+            if not ok:
+                failed_routines.append({"id": routine.id, "name": routine.name, "error": "not found"})
+                continue
+            deleted_routines.append({"id": routine.id, "name": routine.name})
+            if not delete_files:
+                continue
+
+            cleanup_paths = _collect_routine_cleanup_paths(routine.payload or {})
+            cleanup_paths.extend(extra_cleanup_paths)
+            seen_paths: set[str] = set()
+            unique_paths: list[str] = []
+            for path in cleanup_paths:
+                if path in seen_paths:
+                    continue
+                seen_paths.add(path)
+                unique_paths.append(path)
+
+            for relative_path in unique_paths:
+                try:
+                    result = sandbox_delete_file(relative_path, missing_ok=True)
+                    deleted_files.append(
+                        {
+                            "path": str(result.get("path", relative_path)),
+                            "deleted": bool(result.get("deleted", False)),
+                            "missing": bool(result.get("missing", False)),
+                        }
+                    )
+                except Exception as exc:
+                    failed_files.append({"path": relative_path, "error": str(exc)})
+
+        return {
+            "ok": len(deleted_routines) > 0 and len(failed_routines) == 0,
+            "deleted_routines": deleted_routines,
+            "failed_routines": failed_routines,
+            "deleted_files": deleted_files,
+            "failed_files": failed_files,
+        }
 
     @app.post("/internal/wake")
     async def internal_wake(request: Request) -> Any:
@@ -1076,10 +1359,11 @@ def create_app(
             return
 
         if reply and chat_id is not None:
-            await _get_telegram_client().send_message(
-                chat_id=chat_id,
-                text=reply,
-                parse_mode="HTML",
-            )
+            with suppress(Exception):
+                await _get_telegram_client().send_message(
+                    chat_id=chat_id,
+                    text=reply,
+                    parse_mode="HTML",
+                )
 
     return app

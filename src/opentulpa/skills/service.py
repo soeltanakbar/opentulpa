@@ -408,12 +408,27 @@ class SkillStoreService:
             item["skill_path"] = str(row["skill_path"])
         return item
 
-    def ensure_default_skill(self) -> None:
-        name = "skill-creator"
+    def _ensure_global_skill(self, *, name: str, description: str, instructions: str) -> None:
         if self.get_skill(customer_id="", name=name, include_files=False, include_global=True):
             return
         markdown = build_skill_markdown(
             name=name,
+            description=description,
+            instructions=instructions,
+        )
+        self.upsert_skill(
+            scope="global",
+            customer_id="",
+            name=name,
+            skill_markdown=markdown,
+            source="system_bootstrap",
+            enabled=True,
+            supporting_files=None,
+        )
+
+    def ensure_default_skill(self) -> None:
+        self._ensure_global_skill(
+            name="skill-creator",
             description=(
                 "Use this skill when the user asks for recurring behavior/capabilities so the "
                 "assistant can create or update reusable skills."
@@ -431,12 +446,31 @@ class SkillStoreService:
                 "Use global scope only for universally applicable capabilities."
             ),
         )
-        self.upsert_skill(
-            scope="global",
-            customer_id="",
-            name=name,
-            skill_markdown=markdown,
-            source="system_bootstrap",
-            enabled=True,
-            supporting_files=None,
+        self._ensure_global_skill(
+            name="browser-use-operator",
+            description=(
+                "Use this skill for interactive browser tasks that require real page navigation, "
+                "JavaScript rendering, or multi-step website workflows."
+            ),
+            instructions=(
+                "## Purpose\n"
+                "Use Browser Use tools safely and cost-effectively for tasks normal link fetch/search "
+                "cannot complete reliably.\n\n"
+                "## When to use\n"
+                "1. Dynamic websites where static fetching is insufficient.\n"
+                "2. Multi-step navigation/extraction across pages.\n"
+                "3. Tasks requiring browser state and real interactions.\n\n"
+                "## Workflow\n"
+                "1. Clarify task objective and exact deliverable.\n"
+                "2. Set tight scope first: allowed domains and low max_steps.\n"
+                "3. Call browser_use_run.\n"
+                "4. If timed out/in progress, call browser_use_task_get.\n"
+                "5. If needed, call browser_use_task_control to stop/pause.\n"
+                "6. Return concise results, confidence, and any unresolved gaps.\n\n"
+                "## Safety & cost guardrails\n"
+                "- Start with conservative defaults (max_steps around 10-25).\n"
+                "- Restrict domains whenever possible.\n"
+                "- Avoid autonomous long runs without explicit user request.\n"
+                "- Prefer ordinary web tools for simple fetch/search tasks."
+            ),
         )

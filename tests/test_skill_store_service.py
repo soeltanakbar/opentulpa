@@ -19,6 +19,7 @@ def test_skill_store_default_skill_and_user_override(tmp_path: Path) -> None:
     all_global = store.list_skills(customer_id="user_1", include_global=True)
     names = {s["name"] for s in all_global}
     assert "skill-creator" in names
+    assert "browser-use-operator" in names
 
     global_md = build_skill_markdown(
         name="weather-report",

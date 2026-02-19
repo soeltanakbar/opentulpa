@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 import re
+from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
@@ -24,6 +27,135 @@ from opentulpa.agent.utils import (
 from opentulpa.agent.utils import (
     looks_like_shell_command as _looks_like_shell_command,
 )
+
+
+def _browser_use_api_key() -> str:
+    return str(os.environ.get("BROWSER_USE_API_KEY", "")).strip()
+
+
+def _browser_use_base_url() -> str:
+    raw = str(os.environ.get("BROWSER_USE_BASE_URL", "")).strip().rstrip("/")
+    return raw or "https://api.browser-use.com/api/v2"
+
+
+def _browser_use_error_detail(resp: httpx.Response) -> str:
+    try:
+        payload = resp.json()
+    except Exception:
+        return (resp.text or "").strip()[:500] or f"HTTP {resp.status_code}"
+    if isinstance(payload, dict):
+        for key in ("detail", "message", "error"):
+            value = payload.get(key)
+            if value:
+                return str(value)
+    return str(payload)[:500]
+
+
+def _normalize_allowed_domains(allowed_domains: list[str] | None) -> list[str]:
+    if not isinstance(allowed_domains, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in allowed_domains:
+        raw = str(item or "").strip().lower()
+        if not raw:
+            continue
+        host = ""
+        if "://" in raw:
+            host = str(urlparse(raw).hostname or "").strip().lower()
+        else:
+            host = raw.split("/", 1)[0].split(":", 1)[0].strip().lower()
+        host = host.strip(".")
+        if not host or "." not in host:
+            continue
+        if not re.fullmatch(r"[a-z0-9.-]{1,253}", host):
+            continue
+        if host in seen:
+            continue
+        seen.add(host)
+        out.append(host)
+    return out
+
+
+def _normalize_cleanup_paths(paths: list[str] | None) -> list[str]:
+    if not isinstance(paths, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in paths:
+        path = str(item or "").strip()
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        out.append(path)
+    return out
+
+
+def _compact_browser_use_task_view(
+    payload: dict[str, Any],
+    *,
+    include_steps: bool = False,
+    max_steps_preview: int = 3,
+    max_output_chars: int = 12000,
+) -> dict[str, Any]:
+    data = payload if isinstance(payload, dict) else {}
+    steps = data.get("steps", [])
+    steps_list = steps if isinstance(steps, list) else []
+
+    output_text = data.get("output")
+    output = str(output_text) if output_text is not None else None
+    truncated_output = False
+    if output and len(output) > max_output_chars:
+        output = output[:max_output_chars] + "..."
+        truncated_output = True
+
+    output_files_raw = data.get("outputFiles", [])
+    output_files: list[dict[str, Any]] = []
+    if isinstance(output_files_raw, list):
+        for item in output_files_raw[:20]:
+            if isinstance(item, dict):
+                output_files.append(
+                    {
+                        "id": item.get("id"),
+                        "fileName": item.get("fileName"),
+                    }
+                )
+
+    result: dict[str, Any] = {
+        "id": data.get("id"),
+        "session_id": data.get("sessionId"),
+        "status": data.get("status"),
+        "is_success": data.get("isSuccess"),
+        "started_at": data.get("startedAt"),
+        "finished_at": data.get("finishedAt"),
+        "task": data.get("task"),
+        "llm": data.get("llm"),
+        "output": output,
+        "output_truncated": truncated_output,
+        "output_files": output_files,
+        "steps_count": len(steps_list),
+    }
+
+    if include_steps:
+        safe_preview = max(1, min(int(max_steps_preview), 10))
+        preview: list[dict[str, Any]] = []
+        for step in steps_list[:safe_preview]:
+            if not isinstance(step, dict):
+                continue
+            actions = step.get("actions", [])
+            actions_list = [str(a) for a in actions][:5] if isinstance(actions, list) else []
+            preview.append(
+                {
+                    "number": step.get("number"),
+                    "url": step.get("url"),
+                    "next_goal": str(step.get("nextGoal") or "")[:240],
+                    "actions": actions_list,
+                    "screenshot_url": step.get("screenshotUrl"),
+                }
+            )
+        result["steps_preview"] = preview
+        result["steps_preview_truncated"] = len(steps_list) > safe_preview
+    return result
 
 
 def register_runtime_tools(runtime: Any) -> dict[str, Any]:
@@ -115,6 +247,34 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         )
         if r.status_code != 200:
             return {"error": f"uploaded_file_send failed: {r.text}"}
+        return r.json()
+
+    @tool
+    async def web_image_send(
+        url: str,
+        customer_id: str,
+        caption: str | None = None,
+        max_bytes: int = 10_000_000,
+    ) -> Any:
+        """
+        Download an image from a web URL (validated content-type) and send it to Telegram.
+        Use web_search first to find candidate URLs, then call this tool.
+        """
+        safe_max_bytes = max(250_000, min(int(max_bytes), 25_000_000))
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/files/send_web_image",
+            json_body={
+                "url": url,
+                "customer_id": customer_id,
+                "caption": caption,
+                "max_bytes": safe_max_bytes,
+            },
+            timeout=70.0,
+            retries=1,
+        )
+        if r.status_code != 200:
+            return {"error": f"web_image_send failed: {r.text}"}
         return r.json()
 
     @tool
@@ -311,6 +471,224 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         if r.status_code != 200:
             return {"error": "web_search request failed"}
         return r.json().get("result", "No result.")
+
+    @tool
+    async def browser_use_run(
+        task: str,
+        customer_id: str,
+        allowed_domains: list[str] | None = None,
+        max_steps: int = 20,
+        wait_timeout_seconds: int = 180,
+        poll_interval_seconds: int = 4,
+        llm: str = "browser-use-llm",
+        start_url: str | None = None,
+        session_id: str | None = None,
+    ) -> Any:
+        """
+        Run a Browser Use Cloud task and wait for completion.
+        Use for dynamic web tasks that need real browser interactions.
+        """
+        api_key = _browser_use_api_key()
+        if not api_key:
+            return {"error": "browser_use_run unavailable: BROWSER_USE_API_KEY missing"}
+
+        task_text = str(task or "").strip()
+        if not task_text:
+            return {"error": "browser_use_run requires a non-empty task"}
+
+        safe_max_steps = max(1, min(int(max_steps), 80))
+        safe_wait_timeout = max(20, min(int(wait_timeout_seconds), 900))
+        safe_poll_interval = max(2, min(int(poll_interval_seconds), 30))
+        safe_domains = _normalize_allowed_domains(allowed_domains)
+        safe_llm = str(llm or "").strip() or "browser-use-llm"
+        safe_start_url = str(start_url or "").strip()
+        safe_session_id = str(session_id or "").strip()
+
+        payload: dict[str, Any] = {
+            "task": task_text,
+            "maxSteps": safe_max_steps,
+            "llm": safe_llm,
+            "metadata": {
+                "source": "opentulpa",
+                "customer_id": str(customer_id or "").strip()[:120],
+            },
+        }
+        if safe_domains:
+            payload["allowedDomains"] = safe_domains
+        if safe_start_url:
+            payload["startUrl"] = safe_start_url
+        if safe_session_id:
+            payload["sessionId"] = safe_session_id
+
+        headers = {"X-Browser-Use-API-Key": api_key, "Content-Type": "application/json"}
+        timeout = httpx.Timeout(60.0, connect=10.0, read=60.0)
+        base_url = _browser_use_base_url()
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            headers=headers,
+        ) as client:
+            try:
+                create_resp = await client.post(f"{base_url}/tasks", json=payload)
+            except Exception as exc:
+                return {"error": f"browser_use_run create request failed: {exc}"}
+            if create_resp.status_code not in {200, 201, 202}:
+                return {
+                    "error": (
+                        f"browser_use_run create failed: HTTP {create_resp.status_code}: "
+                        f"{_browser_use_error_detail(create_resp)}"
+                    )
+                }
+            try:
+                created = create_resp.json()
+            except Exception:
+                return {"error": "browser_use_run create failed: invalid JSON response"}
+
+            task_id = str(created.get("id") or "").strip()
+            result_session_id = str(created.get("sessionId") or safe_session_id).strip()
+            if not task_id:
+                return {"error": "browser_use_run create failed: missing task id in response"}
+
+            deadline = datetime.now(timezone.utc).timestamp() + safe_wait_timeout
+            while True:
+                try:
+                    task_resp = await client.get(f"{base_url}/tasks/{task_id}")
+                except Exception as exc:
+                    return {"error": f"browser_use_run poll failed: {exc}", "task_id": task_id}
+                if task_resp.status_code != 200:
+                    return {
+                        "error": (
+                            f"browser_use_run poll failed: HTTP {task_resp.status_code}: "
+                            f"{_browser_use_error_detail(task_resp)}"
+                        ),
+                        "task_id": task_id,
+                        "session_id": result_session_id or None,
+                    }
+                try:
+                    task_data = task_resp.json()
+                except Exception:
+                    return {"error": "browser_use_run poll failed: invalid JSON", "task_id": task_id}
+
+                status = str(task_data.get("status") or "").strip().lower()
+                if status in {"finished", "stopped"}:
+                    live_url = None
+                    if result_session_id:
+                        with_context = await client.get(f"{base_url}/sessions/{result_session_id}")
+                        if with_context.status_code == 200:
+                            with suppress(Exception):
+                                live_url = with_context.json().get("liveUrl")
+                    compact = _compact_browser_use_task_view(task_data)
+                    compact["task_id"] = task_id
+                    compact["session_id"] = result_session_id or compact.get("session_id")
+                    compact["status"] = status or str(compact.get("status") or "unknown")
+                    compact["live_url"] = live_url
+                    return compact
+
+                if datetime.now(timezone.utc).timestamp() >= deadline:
+                    return {
+                        "task_id": task_id,
+                        "session_id": result_session_id or None,
+                        "status": status or "started",
+                        "timed_out": True,
+                        "message": (
+                            "Task is still running. Use browser_use_task_get(task_id) "
+                            "to check progress or browser_use_task_control to stop."
+                        ),
+                    }
+
+                await asyncio.sleep(safe_poll_interval)
+
+    @tool
+    async def browser_use_task_get(
+        task_id: str,
+        include_steps: bool = False,
+        max_steps_preview: int = 3,
+    ) -> Any:
+        """Get Browser Use task status/details by task_id (compact by default)."""
+        api_key = _browser_use_api_key()
+        if not api_key:
+            return {"error": "browser_use_task_get unavailable: BROWSER_USE_API_KEY missing"}
+
+        safe_task_id = str(task_id or "").strip()
+        if not safe_task_id:
+            return {"error": "browser_use_task_get requires task_id"}
+
+        headers = {"X-Browser-Use-API-Key": api_key}
+        timeout = httpx.Timeout(45.0, connect=10.0, read=45.0)
+        base_url = _browser_use_base_url()
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            headers=headers,
+        ) as client:
+            try:
+                resp = await client.get(f"{base_url}/tasks/{safe_task_id}")
+            except Exception as exc:
+                return {"error": f"browser_use_task_get request failed: {exc}"}
+            if resp.status_code != 200:
+                return {
+                    "error": (
+                        f"browser_use_task_get failed: HTTP {resp.status_code}: "
+                        f"{_browser_use_error_detail(resp)}"
+                    )
+                }
+            try:
+                payload = resp.json()
+            except Exception:
+                return {"error": "browser_use_task_get failed: invalid JSON response"}
+            return _compact_browser_use_task_view(
+                payload if isinstance(payload, dict) else {},
+                include_steps=bool(include_steps),
+                max_steps_preview=max_steps_preview,
+            )
+
+    @tool
+    async def browser_use_task_control(task_id: str, action: str = "stop_task_and_session") -> Any:
+        """Control Browser Use task execution (stop, pause, resume, or stop_task_and_session)."""
+        api_key = _browser_use_api_key()
+        if not api_key:
+            return {"error": "browser_use_task_control unavailable: BROWSER_USE_API_KEY missing"}
+
+        safe_task_id = str(task_id or "").strip()
+        if not safe_task_id:
+            return {"error": "browser_use_task_control requires task_id"}
+        safe_action = str(action or "").strip().lower()
+        allowed_actions = {"stop", "pause", "resume", "stop_task_and_session"}
+        if safe_action not in allowed_actions:
+            return {
+                "error": (
+                    "browser_use_task_control invalid action. "
+                    "Use one of: stop, pause, resume, stop_task_and_session"
+                )
+            }
+
+        headers = {"X-Browser-Use-API-Key": api_key, "Content-Type": "application/json"}
+        timeout = httpx.Timeout(45.0, connect=10.0, read=45.0)
+        base_url = _browser_use_base_url()
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            headers=headers,
+        ) as client:
+            try:
+                resp = await client.patch(
+                    f"{base_url}/tasks/{safe_task_id}",
+                    json={"action": safe_action},
+                )
+            except Exception as exc:
+                return {"error": f"browser_use_task_control request failed: {exc}"}
+            if resp.status_code != 200:
+                return {
+                    "error": (
+                        f"browser_use_task_control failed: HTTP {resp.status_code}: "
+                        f"{_browser_use_error_detail(resp)}"
+                    )
+                }
+            try:
+                payload = resp.json()
+            except Exception:
+                return {"error": "browser_use_task_control failed: invalid JSON response"}
+            return _compact_browser_use_task_view(payload if isinstance(payload, dict) else {})
 
     @tool
     async def fetch_link_content(
@@ -547,13 +925,16 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         message: str,
         customer_id: str,
         notify_user: bool = True,
+        cleanup_paths: list[str] | None = None,
     ) -> Any:
         """
         Create a scheduled routine.
         - Recurring: cron (e.g. "0 9 * * *")
         - One-time: local ISO datetime (e.g. "2026-02-18T23:45:00+08:00")
+        - cleanup_paths: optional repo-relative file paths to remove when deleting this automation.
         """
         auto_notify = bool(notify_user)
+        safe_cleanup_paths = _normalize_cleanup_paths(cleanup_paths)
 
         r = await runtime._request_with_backoff(
             "POST",
@@ -566,6 +947,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
                     "customer_id": customer_id,
                     "notify_user": auto_notify,
                     "notification_opt_out": not auto_notify,
+                    "cleanup_paths": safe_cleanup_paths,
                 },
                 "is_cron": " " in schedule and len(schedule.split()) >= 5,
             },
@@ -576,14 +958,87 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return r.json()
 
     @tool
-    async def routine_list() -> Any:
-        """List routines."""
+    async def routine_list(customer_id: str) -> Any:
+        """List routines for the current user."""
         r = await runtime._request_with_backoff(
-            "GET", "/internal/scheduler/routines", timeout=10.0
+            "GET",
+            "/internal/scheduler/routines",
+            params={"customer_id": customer_id},
+            timeout=10.0,
         )
         if r.status_code != 200:
             return {"error": f"routine_list failed: {r.text}"}
         return r.json().get("routines", [])
+
+    @tool
+    async def routine_delete(routine_id: str, customer_id: str) -> Any:
+        """Delete/stop one routine by id for the current user."""
+        rid = str(routine_id or "").strip()
+        if not rid:
+            return {"error": "routine_delete failed: routine_id is required"}
+
+        r = await runtime._request_with_backoff(
+            "DELETE",
+            f"/internal/scheduler/routine/{rid}",
+            params={"customer_id": customer_id},
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"routine_delete failed: {r.text}"}
+        payload = r.json() if r.content else {}
+        if not bool(payload.get("ok")):
+            return {
+                "error": "routine_delete failed: routine not found or not accessible",
+                "routine_id": rid,
+            }
+
+        verify = await runtime._request_with_backoff(
+            "GET",
+            "/internal/scheduler/routines",
+            params={"customer_id": customer_id},
+            timeout=10.0,
+        )
+        if verify.status_code != 200:
+            return {
+                "ok": True,
+                "routine_id": rid,
+                "verified_removed": False,
+                "warning": "delete succeeded but verification list failed",
+            }
+        routines = verify.json().get("routines", [])
+        still_present = any(str(item.get("id", "")) == rid for item in routines if isinstance(item, dict))
+        return {
+            "ok": not still_present,
+            "routine_id": rid,
+            "verified_removed": not still_present,
+            "remaining_routines": routines,
+        }
+
+    @tool
+    async def automation_delete(
+        routine_id: str,
+        customer_id: str,
+        delete_files: bool = True,
+        cleanup_paths: list[str] | None = None,
+    ) -> Any:
+        """Delete an automation by id, including optional script/file cleanup."""
+        rid = str(routine_id or "").strip()
+        if not rid:
+            return {"error": "automation_delete failed: routine_id is required"}
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/scheduler/routine/delete_with_assets",
+            json_body={
+                "customer_id": customer_id,
+                "routine_id": rid,
+                "delete_files": bool(delete_files),
+                "cleanup_paths": _normalize_cleanup_paths(cleanup_paths),
+            },
+            timeout=20.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"automation_delete failed: {r.text}"}
+        return r.json()
 
     @tool
     async def server_time() -> Any:
@@ -603,6 +1058,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         "uploaded_file_search": uploaded_file_search,
         "uploaded_file_get": uploaded_file_get,
         "uploaded_file_send": uploaded_file_send,
+        "web_image_send": web_image_send,
         "uploaded_file_analyze": uploaded_file_analyze,
         "skill_list": skill_list,
         "skill_get": skill_get,
@@ -614,6 +1070,9 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         "time_profile_get": time_profile_get,
         "time_profile_set": time_profile_set,
         "web_search": web_search,
+        "browser_use_run": browser_use_run,
+        "browser_use_task_get": browser_use_task_get,
+        "browser_use_task_control": browser_use_task_control,
         "fetch_link_content": fetch_link_content,
         "tulpa_write_file": tulpa_write_file,
         "tulpa_validate_file": tulpa_validate_file,
@@ -627,5 +1086,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         "task_cancel": task_cancel,
         "routine_create": routine_create,
         "routine_list": routine_list,
+        "routine_delete": routine_delete,
+        "automation_delete": automation_delete,
         "server_time": server_time,
     }

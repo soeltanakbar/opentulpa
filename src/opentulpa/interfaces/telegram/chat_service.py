@@ -68,6 +68,39 @@ def _format_agent_error_for_user(exc: Exception) -> str:
     return "I hit a backend error while generating a reply. Please try again."
 
 
+def _inject_voice_message_context(text: str, transcripts: list[str]) -> str:
+    safe_lines = [str(item).strip() for item in transcripts if str(item).strip()]
+    if not safe_lines:
+        return str(text or "")
+    voice_block = "\n".join(f"<user sent voice message>: {line}" for line in safe_lines)
+    base = str(text or "").strip()
+    if base:
+        return f"{base}\n\n{voice_block}"
+    return voice_block
+
+
+def _start_help_text() -> str:
+    return (
+        "OpenTulpa is connected.\n\n"
+        "What I can do:\n"
+        "- Web + links: web search, read URLs, summarize current info\n"
+        "- Interactive browsing: browser automation for dynamic sites (when configured)\n"
+        "- Files: analyze PDFs/DOCX/text/images/voice notes you send\n"
+        "- Code + automations: write/debug scripts, run checks, schedule recurring tasks\n"
+        "- Memory + preferences: remember your style/process directives\n\n"
+        "To personalize quickly, answer these:\n"
+        "1. What are you struggling with right now?\n"
+        "2. Which repetitive task should I automate first?\n"
+        "3. Which services should I connect first (Slack, Gmail, Sheets, etc.)?\n\n"
+        "Commands:\n"
+        "/status\n"
+        "/setup\n"
+        "/set KEY VALUE\n"
+        "/setenv KEY VALUE\n"
+        "/cancel"
+    )
+
+
 async def relay_task_event_via_main_agent(
     *,
     customer_id: str,
@@ -153,16 +186,7 @@ async def handle_telegram_text(
 
     text_lower = ctx.text.lower()
     if text_lower in {"/start", "/help"}:
-        return (
-            "OpenTulpa Telegram is connected.\n"
-            "I can chat and help with key setup.\n\n"
-            "Commands:\n"
-            "/status\n"
-            "/setup\n"
-            "/set KEY VALUE\n"
-            "/setenv KEY VALUE\n"
-            "/cancel"
-        )
+        return _start_help_text()
     if text_lower == "/status":
         agent_up = bool(agent_runtime and getattr(agent_runtime, "healthy", lambda: False)())
         return status_text(agent_up)
@@ -245,8 +269,17 @@ async def handle_telegram_text(
         if file_vault is None:
             return "I received your file, but file storage is not configured."
 
-    context_blob = build_uploaded_files_context(ingested_files)
-    effective_text = ctx.text
+    voice_transcripts = [
+        str(item.get("voice_transcript", "")).strip()
+        for item in ingested_files
+        if str(item.get("kind", "")).strip() == "voice"
+    ]
+    non_voice_files = [
+        item for item in ingested_files if str(item.get("kind", "")).strip() != "voice"
+    ]
+
+    context_blob = build_uploaded_files_context(non_voice_files)
+    effective_text = _inject_voice_message_context(ctx.text, voice_transcripts)
     if context_blob:
         if effective_text:
             effective_text = f"{effective_text}\n\n{context_blob}"
@@ -258,6 +291,12 @@ async def handle_telegram_text(
             )
 
     if not effective_text:
+        has_voice = any(str(getattr(item, "kind", "")).strip() == "voice" for item in attachments)
+        if has_voice:
+            return (
+                "I received your voice message but couldn't transcribe it. "
+                "Please resend a shorter/clearer voice note or send text."
+            )
         return None
 
     if bot_token:

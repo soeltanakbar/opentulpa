@@ -1,0 +1,56 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+from opentulpa.api.app import create_app
+from opentulpa.scheduler.models import Routine
+from opentulpa.scheduler.service import SchedulerService
+
+
+def _mk_client(tmp_path: Path) -> TestClient:
+    scheduler = SchedulerService(db_path=tmp_path / "scheduler.db")
+    scheduler.add_routine(
+        Routine(
+            id="rtn_user1",
+            name="User1 Routine",
+            schedule="0 9 * * *",
+            payload={"customer_id": "telegram_1"},
+            is_cron=True,
+        )
+    )
+    scheduler.add_routine(
+        Routine(
+            id="rtn_user2",
+            name="User2 Routine",
+            schedule="0 10 * * *",
+            payload={"customer_id": "telegram_2"},
+            is_cron=True,
+        )
+    )
+    app = create_app(scheduler=scheduler)
+    return TestClient(app)
+
+
+def test_scheduler_routine_filter_and_owner_delete(tmp_path: Path) -> None:
+    with _mk_client(tmp_path) as client:
+        listed = client.get("/internal/scheduler/routines", params={"customer_id": "telegram_1"})
+        assert listed.status_code == 200
+        routines = listed.json()["routines"]
+        assert {r["id"] for r in routines} == {"rtn_user1"}
+
+        denied = client.request(
+            "DELETE",
+            "/internal/scheduler/routine/rtn_user2",
+            params={"customer_id": "telegram_1"},
+        )
+        assert denied.status_code == 403
+
+        deleted = client.request(
+            "DELETE",
+            "/internal/scheduler/routine/rtn_user1",
+            params={"customer_id": "telegram_1"},
+        )
+        assert deleted.status_code == 200
+        assert deleted.json()["ok"] is True

@@ -40,12 +40,19 @@ def build_runtime_graph(runtime: Any):
         "uploaded_file_search": ("query",),
         "uploaded_file_get": ("file_id",),
         "uploaded_file_send": ("file_id",),
+        "web_image_send": ("url",),
         "uploaded_file_analyze": ("file_id",),
         "skill_get": ("name",),
         "skill_upsert": ("name", "description", "instructions"),
         "skill_delete": ("name",),
         "directive_set": ("directive",),
         "time_profile_set": ("utc_offset",),
+        "browser_use_run": ("task",),
+        "browser_use_task_get": ("task_id",),
+        "browser_use_task_control": ("task_id",),
+        "routine_list": ("customer_id",),
+        "routine_delete": ("routine_id", "customer_id"),
+        "automation_delete": ("routine_id", "customer_id"),
     }
 
     system_prompt = SystemMessage(
@@ -54,6 +61,7 @@ def build_runtime_graph(runtime: Any):
             "Always validate required tool arguments before calling. "
             "If a tool fails, self-repair once with a low-risk correction and retry. "
             "Do not output vague preambles; give concrete updates. "
+            "Default to concise answers: keep responses short and direct unless the user asks for depth. "
             "When a user gives persistent behavior preferences (style, coding approach, process), "
             "call directive_set with a concise durable directive summary before your response. "
             "If the user asks to forget/reset old preferences, call directive_clear first. "
@@ -63,17 +71,46 @@ def build_runtime_graph(runtime: Any):
             "Do not manually convert one-time reminders into UTC cron expressions. "
             "For scheduled routines, default notify_user=true unless the user explicitly asks "
             "for no notifications/alerts. "
+            "When users ask to stop/cancel/remove reminders or scheduled scripts, use "
+            "routine_list first, reason over returned routines, then call routine_delete by routine_id. "
+            "Only claim success "
+            "after tool output confirms deletion/verified_removed. "
+            "When users ask to delete an automation and its related script/files, use "
+            "automation_delete by routine_id with delete_files=true. "
+            "When creating automations that depend on generated files, include cleanup_paths "
+            "in routine_create so later cleanup can be deterministic. "
             "If user tells you their timezone or UTC offset, call time_profile_set. "
+            "Tool-selection policy: "
+            "1) If user gives a specific URL to read, call fetch_link_content first. "
+            "2) If user needs general/current info discovery, use web_search first, then fetch_link_content for exact links. "
+            "3) Use browser_use_run only when the task requires real browser interaction (clicking, forms, login, "
+            "multi-step navigation, dynamic JS rendering) or when simpler tools are insufficient. "
+            "Prefer the cheapest/simplest tool path that can satisfy the objective. "
             "When a user provides a specific URL and asks to inspect/read/summarize it, "
             "call fetch_link_content first (do not rely only on web_search). "
             "When users refer to files they uploaded earlier (e.g. 'the table/orders file'), "
             "use uploaded_file_search, then uploaded_file_get/uploaded_file_analyze/uploaded_file_send as needed. "
+            "When users ask to send an image from the web, use web_search to find candidate URLs, "
+            "then call web_image_send (it validates URL content-type is image/* before sending). "
+            "When a task needs real interactive browsing (dynamic pages, multi-step navigation, "
+            "authenticated workflows, JavaScript-heavy sites), use browser_use_run with constrained "
+            "allowed_domains and conservative max_steps/timeouts. "
+            "If needed, use browser_use_task_get for progress and browser_use_task_control to stop/pause. "
+            "Keep browser task follow-up compact: request step previews only when explicitly required. "
             "When a user requests recurring behavior/workflow/persona, collaborate briefly to clarify and then "
             "store it as a reusable user skill via skill_upsert. "
             "On future related requests, use skill_list/skill_get if needed and follow matched skill guidance. "
             "When creating or editing code with tulpa_write_file, call tulpa_validate_file on each edited file. "
             "Before claiming code tasks are complete, run tulpa_run_terminal quality checks "
             "(at least ruff + compileall; run pytest when tests exist). "
+            "If the user asks what you can do/capabilities, include concrete integration capabilities: "
+            "setting/storing API keys from Telegram setup flows, building new service integrations by writing code, "
+            "scheduling periodic polling jobs, and producing change summaries/alerts from API or web data. "
+            "For capability requests, avoid generic marketing copy. "
+            "Use a consultative format: "
+            "1) concise capability overview grounded in actual tools, "
+            "2) ask 2-3 diagnostic onboarding questions about user goals, bottlenecks, and desired integrations, "
+            "3) propose one concrete next action. "
             "Do not claim completion while validation/tests are failing."
         )
     )
@@ -254,6 +291,7 @@ def build_runtime_graph(runtime: Any):
                     "uploaded_file_search",
                     "uploaded_file_get",
                     "uploaded_file_send",
+                    "web_image_send",
                     "uploaded_file_analyze",
                     "skill_list",
                     "skill_get",
@@ -264,7 +302,11 @@ def build_runtime_graph(runtime: Any):
                     "directive_clear",
                     "time_profile_get",
                     "time_profile_set",
+                    "routine_list",
                     "routine_create",
+                    "routine_delete",
+                    "automation_delete",
+                    "browser_use_run",
                 }:
                     args = {**args, "customer_id": customer_id}
                 if call_name == "routine_create":

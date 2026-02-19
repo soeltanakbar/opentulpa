@@ -122,7 +122,40 @@ async def ingest_attachments(
             caption=caption,
             raw_bytes=bytes(raw_bytes),
         )
+        if (
+            attachment.kind == "voice"
+            and agent_runtime is not None
+            and hasattr(agent_runtime, "transcribe_audio_blob")
+        ):
+            with suppress(Exception):
+                transcript = await agent_runtime.transcribe_audio_blob(
+                    filename=attachment.filename or file_path_name or f"{attachment.kind}.ogg",
+                    mime_type=attachment.mime_type
+                    or str(downloaded.get("mime_type", "")).strip()
+                    or None,
+                    kind=attachment.kind,
+                    raw_bytes=bytes(raw_bytes),
+                )
+                if transcript:
+                    record = {**record, "voice_transcript": str(transcript).strip()[:4000]}
         if agent_runtime is not None and hasattr(agent_runtime, "summarize_uploaded_blob"):
+            if attachment.kind == "voice":
+                ingested.append(record)
+                if memory is not None:
+                    with suppress(Exception):
+                        memory.add_text(
+                            (
+                                "User sent voice message: "
+                                f"id={record.get('id')} transcript={str(record.get('voice_transcript', ''))[:1200]}"
+                            ),
+                            user_id=customer_id,
+                            metadata={
+                                "kind": "uploaded_voice_message",
+                                "file_id": record.get("id"),
+                                "file_kind": record.get("kind"),
+                            },
+                        )
+                continue
             with suppress(Exception):
                 ai_summary = await agent_runtime.summarize_uploaded_blob(
                     filename=str(record.get("original_filename", "")).strip() or None,

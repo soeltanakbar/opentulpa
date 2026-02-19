@@ -49,6 +49,9 @@ from opentulpa.agent.file_analysis import (
 from opentulpa.agent.file_analysis import (
     summarize_uploaded_blob as _summarize_uploaded_blob,
 )
+from opentulpa.agent.file_analysis import (
+    transcribe_audio_blob as _transcribe_audio_blob,
+)
 from opentulpa.agent.graph_builder import build_runtime_graph
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage
 from opentulpa.agent.tools_registry import register_runtime_tools
@@ -114,6 +117,20 @@ class OpenTulpaLangGraphRuntime:
         raw = str(text or "").strip()
         if not raw:
             return None
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            pass
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end <= start:
+            return None
+        try:
+            parsed = json.loads(raw[start : end + 1])
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
 
     @staticmethod
     def _strip_internal_json_prefix(text: str) -> str:
@@ -152,20 +169,35 @@ class OpenTulpaLangGraphRuntime:
             changed = True
 
         return working if changed else raw
+
+    @staticmethod
+    def _has_incomplete_internal_json_prefix(text: str) -> bool:
+        """
+        Detect incomplete internal control JSON prefixes during streaming.
+        This prevents leaking partial internal payloads (e.g. '{"selected": ...') to users.
+        """
+        working = str(text or "").lstrip()
+        if not working.startswith("{"):
+            return False
+        head = working[:400]
+        if '"selected"' not in head and '"notify_user"' not in head:
+            return False
+        decoder = json.JSONDecoder()
         try:
-            parsed = json.loads(raw)
-            return parsed if isinstance(parsed, dict) else None
+            parsed, _ = decoder.raw_decode(working)
         except Exception:
-            pass
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start == -1 or end <= start:
-            return None
-        try:
-            parsed = json.loads(raw[start : end + 1])
-            return parsed if isinstance(parsed, dict) else None
-        except Exception:
-            return None
+            return True
+        is_internal_selector = (
+            isinstance(parsed, dict)
+            and set(parsed.keys()) == {"selected"}
+            and isinstance(parsed.get("selected"), list)
+        )
+        is_internal_classifier = (
+            isinstance(parsed, dict)
+            and "notify_user" in parsed
+            and set(parsed.keys()).issubset({"notify_user", "reason"})
+        )
+        return bool(is_internal_selector or is_internal_classifier)
 
     @staticmethod
     def _format_pending_context(events: list[dict[str, Any]], *, payload_limit: int = 800) -> str:
@@ -523,6 +555,22 @@ class OpenTulpaLangGraphRuntime:
             question=question,
         )
 
+    async def transcribe_audio_blob(
+        self,
+        *,
+        filename: str | None,
+        mime_type: str | None,
+        kind: str | None,
+        raw_bytes: bytes,
+    ) -> str:
+        return await _transcribe_audio_blob(
+            self,
+            filename=filename,
+            mime_type=mime_type,
+            kind=kind,
+            raw_bytes=raw_bytes,
+        )
+
     async def analyze_uploaded_file(
         self,
         *,
@@ -558,6 +606,29 @@ class OpenTulpaLangGraphRuntime:
             thread_id=thread_id,
             customer_id=customer_id,
         )
+
+    async def _pre_resolve_skill_state(
+        self,
+        *,
+        customer_id: str,
+        user_text: str,
+    ) -> dict[str, Any]:
+        query = str(user_text or "").strip()
+        if not query:
+            return {
+                "active_skill_query": "",
+                "active_skill_context": "",
+                "active_skill_names": [],
+            }
+        resolved = await self._resolve_skill_context(customer_id, query)
+        context = str(resolved.get("context", "")).strip()
+        names_raw = resolved.get("skill_names", [])
+        names = [str(n).strip() for n in names_raw if str(n).strip()] if isinstance(names_raw, list) else []
+        return {
+            "active_skill_query": query,
+            "active_skill_context": context,
+            "active_skill_names": names,
+        }
 
     async def start(self) -> None:
         if self._graph is not None:
@@ -600,6 +671,10 @@ class OpenTulpaLangGraphRuntime:
             text=text,
             include_pending_context=include_pending_context,
         )
+        skill_state = await self._pre_resolve_skill_state(
+            customer_id=customer_id,
+            user_text=merged_text,
+        )
         config = {"configurable": {"thread_id": thread_id}, "recursion_limit": self.recursion_limit}
         result = await self._graph.ainvoke(
             {
@@ -607,6 +682,7 @@ class OpenTulpaLangGraphRuntime:
                 "customer_id": customer_id,
                 "thread_id": thread_id,
                 "tool_error_count": 0,
+                **skill_state,
             },
             config=config,
         )
@@ -614,6 +690,8 @@ class OpenTulpaLangGraphRuntime:
         for message in reversed(messages):
             if isinstance(message, AIMessage) and (message.content or "").strip():
                 cleaned = self._strip_internal_json_prefix(str(message.content))
+                if self._has_incomplete_internal_json_prefix(cleaned):
+                    continue
                 if through_id is not None and self._context_events is not None:
                     self._context_events.clear_events(customer_id, through_id=through_id)
                 return cleaned.strip()
@@ -635,14 +713,20 @@ class OpenTulpaLangGraphRuntime:
             text=text,
             include_pending_context=include_pending_context,
         )
+        skill_state = await self._pre_resolve_skill_state(
+            customer_id=customer_id,
+            user_text=merged_text,
+        )
         config = {"configurable": {"thread_id": thread_id}, "recursion_limit": self.recursion_limit}
         accumulated = ""
+        yielded_any = False
         async for message_chunk, metadata in self._graph.astream(
             {
                 "messages": [HumanMessage(content=merged_text)],
                 "customer_id": customer_id,
                 "thread_id": thread_id,
                 "tool_error_count": 0,
+                **skill_state,
             },
             config=config,
             stream_mode="messages",
@@ -652,12 +736,17 @@ class OpenTulpaLangGraphRuntime:
             if message_chunk.content:
                 accumulated += str(message_chunk.content)
                 cleaned = self._strip_internal_json_prefix(accumulated)
+                if not cleaned.strip():
+                    continue
+                if cleaned == accumulated and self._has_incomplete_internal_json_prefix(accumulated):
+                    continue
                 if cleaned.strip():
+                    yielded_any = True
                     yield cleaned
 
         if accumulated and through_id is not None and self._context_events is not None:
             self._context_events.clear_events(customer_id, through_id=through_id)
-        if not accumulated:
+        if not yielded_any:
             final = await self.ainvoke_text(
                 thread_id=thread_id,
                 customer_id=customer_id,

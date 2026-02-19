@@ -40,9 +40,11 @@ Telemetry/tracing is configured directly in OpenRouter (built-in provider traces
 See `.env.example` for full configuration. Core variables:
 
 - `OPENROUTER_API_KEY`
+- `BROWSER_USE_API_KEY` (optional, enables interactive browser tasks)
 - `LLM_MODEL` (default `gemini-3-flash-preview`)
 - `OPENROUTER_BASE_URL` (default `https://openrouter.ai/api/v1`)
 - `OPENROUTER_EMBEDDING_MODEL` (default `openai/text-embedding-3-small`)
+- `BROWSER_USE_BASE_URL` (default `https://api.browser-use.com/api/v2`)
 - `MEM0_QDRANT_PATH` (default `.opentulpa/qdrant`)
 - `MEM0_QDRANT_ON_DISK` (default `true`)
 - `AGENT_CHECKPOINT_DB_PATH` (default `.opentulpa/langgraph_checkpoints.sqlite`)
@@ -74,6 +76,12 @@ The agent stores one active persistent directive per user and overwrites it when
 
 For links and documents, you can send a URL directly (HTML, PDF, DOCX, images). The LangGraph layer
 uses a dedicated content-fetch tool to read exact links, and falls back to web search only when needed.
+For web images, the agent can search URLs, validate the URL resolves to an `image/*` file, download it,
+and send it to Telegram.
+Telegram voice messages are transcribed via OpenRouter audio input and injected into the current user
+turn context as text.
+For interactive web tasks (dynamic sites, multi-step browsing), the agent can call Browser Use Cloud
+tools when `BROWSER_USE_API_KEY` is configured.
 
 Scheduled routines default to direct user notification (`notify_user=true`). To suppress alerts,
 explicitly ask for no notification (for example: "run this silently" or "don't alert me").

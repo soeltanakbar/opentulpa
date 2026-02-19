@@ -131,6 +131,27 @@ def write_file(relative_path: str, content: str) -> Path:
     return target
 
 
+def delete_file(relative_path: str, *, missing_ok: bool = True) -> dict[str, Any]:
+    target = resolve_allowed_write_path(relative_path)
+    if target.is_dir():
+        raise ValueError("path is a directory")
+    if not target.exists():
+        if missing_ok:
+            return {
+                "ok": True,
+                "deleted": False,
+                "missing": True,
+                "path": str(target.relative_to(PROJECT_ROOT)),
+            }
+        raise ValueError("file not found")
+    target.unlink()
+    return {
+        "ok": True,
+        "deleted": True,
+        "path": str(target.relative_to(PROJECT_ROOT)),
+    }
+
+
 def _extract_router_names(tree: ast.Module) -> set[str]:
     names: set[str] = set()
     for node in tree.body:

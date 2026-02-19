@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import mimetypes
 from typing import Any
@@ -13,6 +14,24 @@ from opentulpa.interfaces.telegram.formatter import prepare_text_and_mode
 logger = logging.getLogger(__name__)
 
 
+def _resolve_media_send_target(
+    *,
+    kind: str,
+    filename: str,
+    mime_type: str | None,
+) -> tuple[str, str]:
+    safe_kind = str(kind or "").strip().lower()
+    safe_name = str(filename or "").strip().lower()
+    safe_mime = str(mime_type or "").strip().lower()
+
+    is_gif = safe_mime == "image/gif" or safe_name.endswith(".gif")
+    if safe_kind in {"animation", "gif"} or is_gif:
+        return "sendAnimation", "animation"
+    if safe_kind == "photo" and safe_mime.startswith("image/"):
+        return "sendPhoto", "photo"
+    return "sendDocument", "document"
+
+
 class TelegramClient:
     """Thin async client around Telegram Bot API endpoints used by OpenTulpa."""
 
@@ -21,9 +40,24 @@ class TelegramClient:
 
     async def _post(self, method: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         url = f"https://api.telegram.org/bot{self.bot_token}/{method}"
-        async with httpx.AsyncClient() as client:
-            r = await client.post(url, json=payload, timeout=15.0)
+        retryable_http = {408, 429, 500, 502, 503, 504}
+        timeout = httpx.Timeout(20.0, connect=8.0, read=15.0)
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                async with httpx.AsyncClient() as client:
+                    r = await client.post(url, json=payload, timeout=timeout)
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(0.4 * (2**attempt))
+                    continue
+                logger.warning("Telegram API %s transport error: %s", method, exc)
+                return None
+
             if not r.is_success:
+                if r.status_code in retryable_http and attempt < max_attempts - 1:
+                    await asyncio.sleep(0.4 * (2**attempt))
+                    continue
                 logger.warning(
                     "Telegram API %s HTTP %s: %s",
                     method,
@@ -31,15 +65,30 @@ class TelegramClient:
                     (r.text or "")[:400],
                 )
                 return None
+
             try:
                 data = r.json()
             except Exception:
                 logger.warning("Telegram API %s returned non-JSON body", method)
                 return None
+
             if isinstance(data, dict) and data.get("ok") is True:
                 return data
+
+            if attempt < max_attempts - 1:
+                retry_after = None
+                if isinstance(data, dict):
+                    params = data.get("parameters", {})
+                    if isinstance(params, dict):
+                        value = params.get("retry_after")
+                        if isinstance(value, int) and value > 0:
+                            retry_after = min(value, 5)
+                await asyncio.sleep(float(retry_after) if retry_after is not None else 0.4 * (2**attempt))
+                continue
+
             logger.warning("Telegram API %s returned error payload: %s", method, str(data)[:400])
             return None
+        return None
 
     async def send_message(
         self,
@@ -62,6 +111,7 @@ class TelegramClient:
         text: str,
         message_id: int | None = None,
         parse_mode: str | None = None,
+        allow_fallback_send: bool = True,
     ) -> int | None:
         final_text, final_mode = prepare_text_and_mode(text, parse_mode)
         if not final_text:
@@ -86,6 +136,8 @@ class TelegramClient:
             payload["parse_mode"] = final_mode
         data = await self._post("editMessageText", payload)
         if data:
+            return message_id
+        if not allow_fallback_send:
             return message_id
         fallback_payload: dict[str, Any] = {"chat_id": chat_id, "text": final_text}
         if final_mode:
@@ -139,10 +191,11 @@ class TelegramClient:
         parse_mode: str | None = None,
     ) -> bool:
         safe_name = str(filename or "file.bin").strip() or "file.bin"
-        safe_kind = str(kind or "").strip().lower()
-        should_send_photo = safe_kind == "photo" and str(mime_type or "").startswith("image/")
-        method = "sendPhoto" if should_send_photo else "sendDocument"
-        media_field = "photo" if should_send_photo else "document"
+        method, media_field = _resolve_media_send_target(
+            kind=kind,
+            filename=safe_name,
+            mime_type=mime_type,
+        )
 
         payload: dict[str, Any] = {"chat_id": str(chat_id)}
         if caption:

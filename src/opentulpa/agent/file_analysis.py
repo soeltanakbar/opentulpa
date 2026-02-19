@@ -9,6 +9,8 @@ from typing import Any
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
+import httpx
+
 from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
 from opentulpa.agent.utils import content_to_text as _content_to_text
 
@@ -69,6 +71,122 @@ def extract_uploaded_text(
     except Exception:
         text = ""
     return str(text or "").strip()[:max_chars]
+
+
+def _infer_audio_format(*, filename: str | None, mime_type: str | None) -> str:
+    safe_name = str(filename or "").lower().strip()
+    safe_mime = str(mime_type or "").lower().split(";", 1)[0].strip()
+    ext = ""
+    if "." in safe_name:
+        ext = safe_name.rsplit(".", 1)[-1].strip()
+
+    ext_map = {
+        "wav": "wav",
+        "mp3": "mp3",
+        "aiff": "aiff",
+        "aac": "aac",
+        "ogg": "ogg",
+        "oga": "ogg",
+        "flac": "flac",
+        "m4a": "m4a",
+    }
+    if ext in ext_map:
+        return ext_map[ext]
+
+    mime_map = {
+        "audio/wav": "wav",
+        "audio/x-wav": "wav",
+        "audio/mpeg": "mp3",
+        "audio/mp3": "mp3",
+        "audio/aiff": "aiff",
+        "audio/aac": "aac",
+        "audio/ogg": "ogg",
+        "audio/flac": "flac",
+        "audio/mp4": "m4a",
+        "audio/m4a": "m4a",
+    }
+    return mime_map.get(safe_mime, "ogg")
+
+
+async def transcribe_audio_blob(
+    runtime: Any,
+    *,
+    filename: str | None,
+    mime_type: str | None,
+    kind: str | None,
+    raw_bytes: bytes,
+) -> str:
+    """Transcribe short uploaded audio/voice files via OpenRouter input_audio."""
+    safe_kind = str(kind or "").strip().lower()
+    safe_mime = str(mime_type or "").lower().split(";", 1)[0].strip()
+    content_bytes = bytes(raw_bytes or b"")
+    if not content_bytes:
+        return ""
+    if safe_kind not in {"voice", "audio"} and not safe_mime.startswith("audio/"):
+        return ""
+    if len(content_bytes) > 12_000_000:
+        return ""
+
+    api_key = str(getattr(runtime, "openrouter_api_key", "") or "").strip()
+    if not api_key:
+        return ""
+    base_url = (
+        str(getattr(runtime, "openrouter_base_url", "") or "").strip().rstrip("/")
+        or "https://openrouter.ai/api/v1"
+    )
+    model_name = str(getattr(runtime, "model_name", "") or "").strip()
+    if not model_name:
+        return ""
+
+    audio_format = _infer_audio_format(filename=filename, mime_type=safe_mime)
+    b64_audio = base64.b64encode(content_bytes).decode("ascii")
+    payload = {
+        "model": model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Transcribe this audio message accurately. "
+                            "Return plain text only, no commentary."
+                        ),
+                    },
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": b64_audio,
+                            "format": audio_format,
+                        },
+                    },
+                ],
+            }
+        ],
+        "temperature": 0,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=75.0) as client:
+            resp = await client.post(
+                f"{base_url}/chat/completions",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+        if resp.status_code >= 400:
+            return ""
+        data = resp.json()
+        choices = data.get("choices", [])
+        if not isinstance(choices, list) or not choices:
+            return ""
+        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        transcript = _content_to_text(message.get("content", "")).strip()
+        return transcript[:4000]
+    except Exception:
+        return ""
 
 
 async def summarize_uploaded_blob(

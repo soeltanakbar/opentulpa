@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Any
 
 from opentulpa.core.ids import new_short_id
@@ -21,7 +23,10 @@ def normalize_reply_text(text: str) -> str:
 
 
 def is_low_signal_reply(text: str) -> bool:
-    return normalize_reply_text(text) in LOW_SIGNAL_REPLIES
+    normalized = normalize_reply_text(text)
+    if not normalized:
+        return True
+    return normalized in LOW_SIGNAL_REPLIES
 
 
 def debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
@@ -41,6 +46,42 @@ def debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[str
         pass
 
 
+async def _push_loading_sequence(
+    *,
+    client: TelegramClient,
+    chat_id: int,
+    message_id: int | None = None,
+    delay_seconds: float = 0.22,
+    stop_event: asyncio.Event | None = None,
+    previous_marker: str | None = None,
+) -> tuple[int | None, str | None]:
+    sequence = ("...", "..", ".", "..", "...")
+    current_id = message_id
+    last_marker = previous_marker
+    for marker in sequence:
+        if stop_event is not None and stop_event.is_set():
+            break
+        if marker == last_marker:
+            continue
+        current_id = (
+            await client.upsert_stream_message(
+                chat_id=chat_id,
+                text=marker,
+                message_id=current_id,
+                parse_mode=None,
+                allow_fallback_send=False,
+            )
+            or current_id
+        )
+        last_marker = marker
+        if stop_event is None:
+            await asyncio.sleep(delay_seconds)
+            continue
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop_event.wait(), timeout=delay_seconds)
+    return current_id, last_marker
+
+
 async def stream_langgraph_reply_to_telegram(
     *,
     agent_runtime: Any,
@@ -54,6 +95,21 @@ async def stream_langgraph_reply_to_telegram(
     last_streamed = ""
     final_reply = None
     client = TelegramClient(bot_token)
+    loader_stop = asyncio.Event()
+    stream_state: dict[str, int | None] = {"message_id": stream_message_id}
+    loader_last_marker: dict[str, str | None] = {"value": None}
+
+    async def _loader_loop() -> None:
+        while not loader_stop.is_set():
+            stream_state["message_id"], loader_last_marker["value"] = await _push_loading_sequence(
+                client=client,
+                chat_id=chat_id,
+                message_id=stream_state.get("message_id"),
+                stop_event=loader_stop,
+                previous_marker=loader_last_marker["value"],
+            )
+
+    loader_task = asyncio.create_task(_loader_loop())
     async for partial in agent_runtime.astream_text(
         thread_id=thread_id,
         customer_id=customer_id,
@@ -64,6 +120,11 @@ async def stream_langgraph_reply_to_telegram(
         current = partial.strip()
         if not current or is_low_signal_reply(current) or current == last_streamed:
             continue
+        if not loader_stop.is_set():
+            loader_stop.set()
+            with suppress(Exception):
+                await loader_task
+        stream_message_id = stream_state.get("message_id")
         stream_message_id = (
             await client.upsert_stream_message(
                 chat_id=chat_id,
@@ -75,6 +136,11 @@ async def stream_langgraph_reply_to_telegram(
         )
         last_streamed = current
         final_reply = current
+        stream_state["message_id"] = stream_message_id
+    if not loader_stop.is_set():
+        loader_stop.set()
+    with suppress(Exception):
+        await loader_task
     return final_reply
 
 
