@@ -91,7 +91,7 @@ async def stream_langgraph_reply_to_telegram(
     text: str,
     bot_token: str,
     chat_id: int,
- ) -> tuple[str | None, bool]:
+) -> tuple[str | None, bool]:
     stream_message_id: int | None = None
     last_streamed = ""
     final_reply = None
@@ -112,12 +112,45 @@ async def stream_langgraph_reply_to_telegram(
 
     loader_task = asyncio.create_task(_loader_loop())
     suppressed = False
+    first_token_timeout_s = 45.0
+    stream_idle_timeout_s = 120.0
     try:
-        async for partial in agent_runtime.astream_text(
+        stream = agent_runtime.astream_text(
             thread_id=thread_id,
             customer_id=customer_id,
             text=text,
-        ):
+        )
+        stream_iter = stream.__aiter__()
+        while True:
+            timeout_s = first_token_timeout_s if not last_streamed else stream_idle_timeout_s
+            try:
+                partial = await asyncio.wait_for(stream_iter.__anext__(), timeout=timeout_s)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                with suppress(Exception):
+                    await stream.aclose()
+                if not loader_stop.is_set():
+                    loader_stop.set()
+                    with suppress(Exception):
+                        await loader_task
+                stream_message_id = stream_state.get("message_id")
+                timeout_text = (
+                    "Still working, but the model response timed out. "
+                    "Please retry in a moment."
+                )
+                stream_message_id = (
+                    await client.upsert_stream_message(
+                        chat_id=chat_id,
+                        text=timeout_text,
+                        message_id=stream_message_id,
+                        parse_mode="HTML",
+                    )
+                    or stream_message_id
+                )
+                stream_state["message_id"] = stream_message_id
+                final_reply = timeout_text
+                break
             if not isinstance(partial, str):
                 continue
             current = partial.strip()

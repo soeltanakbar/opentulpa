@@ -475,6 +475,7 @@ def create_app(
         get_telegram_client=get_telegram_client,
         get_telegram_chat=get_telegram_chat,
         get_agent_runtime=get_agent_runtime,
+        get_context_events=get_context_events,
         decide_approval_and_maybe_wake=decide_approval_and_maybe_wake,
     )
 

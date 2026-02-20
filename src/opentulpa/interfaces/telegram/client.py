@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import mimetypes
+from contextlib import suppress
 from typing import Any
 
 import httpx
@@ -55,6 +56,16 @@ class TelegramClient:
                 return None
 
             if not r.is_success:
+                # Telegram returns HTTP 400 for no-op edits:
+                # "Bad Request: message is not modified".
+                # For streaming loader updates this is benign and should not be treated
+                # as a hard failure.
+                if method == "editMessageText":
+                    with suppress(Exception):
+                        data = r.json()
+                        desc = str((data or {}).get("description", "")).lower()
+                        if "message is not modified" in desc:
+                            return {"ok": True, "result": {}}
                 if r.status_code in retryable_http and attempt < max_attempts - 1:
                     await asyncio.sleep(0.4 * (2**attempt))
                     continue

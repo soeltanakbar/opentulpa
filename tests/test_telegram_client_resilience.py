@@ -34,6 +34,24 @@ class _RetryThenSuccessClient:
         return httpx.Response(200, json={"ok": True, "result": {"message_id": 123}})
 
 
+class _NotModifiedEditClient:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, *args, **kwargs):
+        return httpx.Response(
+            400,
+            json={
+                "ok": False,
+                "error_code": 400,
+                "description": "Bad Request: message is not modified",
+            },
+        )
+
+
 @pytest.mark.asyncio
 async def test_post_returns_none_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(telegram_client_module.httpx, "AsyncClient", _AlwaysTimeoutClient)
@@ -51,3 +69,12 @@ async def test_post_retries_and_succeeds(monkeypatch: pytest.MonkeyPatch) -> Non
     assert isinstance(result, dict)
     assert result.get("ok") is True
     assert _RetryThenSuccessClient.attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_post_treats_not_modified_edit_as_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(telegram_client_module.httpx, "AsyncClient", _NotModifiedEditClient)
+    tg = TelegramClient("dummy")
+    result = await tg._post("editMessageText", {"chat_id": 1, "message_id": 10, "text": "..."})
+    assert isinstance(result, dict)
+    assert result.get("ok") is True

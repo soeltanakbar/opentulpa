@@ -420,10 +420,18 @@ def build_runtime_graph(runtime: Any):
                     "After approval, call guardrail_execute_approved_action with this approval_id."
                 )
             else:
-                content = (
-                    "TOOL_DENIED: guardrail denied action and no approval can be requested. "
-                    f"summary={summary}; reason={reason}."
-                )
+                if reason.startswith("already_executed_recent_"):
+                    content = (
+                        "TOOL_ALREADY_EXECUTED: This external-impact action (or an equivalent one) "
+                        "was already executed recently. Do not ask for approval again; instead report "
+                        "the prior execution and suggest checking status/results. "
+                        f"summary={summary}; reason={reason}."
+                    )
+                else:
+                    content = (
+                        "TOOL_DENIED: guardrail denied action and no approval can be requested. "
+                        f"summary={summary}; reason={reason}."
+                    )
             gate_messages.append(ToolMessage(content=content, tool_call_id=call_id))
 
         update: dict[str, Any] = {

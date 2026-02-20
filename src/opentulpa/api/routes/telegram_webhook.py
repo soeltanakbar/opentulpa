@@ -42,6 +42,7 @@ def _parse_text_token_decision(text: str) -> tuple[str, str] | None:
 async def _execute_approved_action_and_summarize(
     *,
     get_agent_runtime: Callable[[], Any],
+    get_context_events: Callable[[], Any],
     approval_id: str,
     decision_payload: dict[str, Any],
     chat_id: int,
@@ -62,7 +63,33 @@ async def _execute_approved_action_and_summarize(
             action_args={"approval_id": approval_id, "customer_id": customer_id},
         )
     except Exception as exc:
+        with suppress(Exception):
+            get_context_events().add_event(
+                customer_id=customer_id,
+                source="approval",
+                event_type="execute_failed",
+                payload={
+                    "approval_id": approval_id,
+                    "thread_id": thread_id,
+                    "error": str(exc),
+                },
+            )
         return f"I couldn't execute the approved action: {exc}"
+
+    with suppress(Exception):
+        get_context_events().add_event(
+            customer_id=customer_id,
+            source="approval",
+            event_type="executed",
+            payload={
+                "approval_id": approval_id,
+                "thread_id": thread_id,
+                "execution_result": execution_result if isinstance(execution_result, dict) else {"raw": str(execution_result)},
+            },
+        )
+
+    if isinstance(execution_result, dict) and bool(execution_result.get("already_executed")):
+        return "This approved action was already executed successfully earlier."
 
     payload_preview = json.dumps(execution_result, ensure_ascii=False)[:6000]
     try:
@@ -122,6 +149,7 @@ async def _run_post_approval_execution_flow(
     *,
     get_telegram_client: Callable[[], Any],
     get_agent_runtime: Callable[[], Any],
+    get_context_events: Callable[[], Any],
     approval_id: str,
     decision_payload: dict[str, Any],
     chat_id: int,
@@ -157,6 +185,7 @@ async def _run_post_approval_execution_flow(
     try:
         outcome = await _execute_approved_action_and_summarize(
             get_agent_runtime=get_agent_runtime,
+            get_context_events=get_context_events,
             approval_id=approval_id,
             decision_payload=decision_payload,
             chat_id=chat_id,
@@ -188,6 +217,7 @@ def register_telegram_webhook_routes(
     get_telegram_client: Callable[[], Any],
     get_telegram_chat: Callable[[], Any],
     get_agent_runtime: Callable[[], Any],
+    get_context_events: Callable[[], Any],
     decide_approval_and_maybe_wake: Callable[..., Awaitable[dict[str, Any]]],
 ) -> None:
     """Register Telegram webhook with callback + text-token approval support."""
@@ -238,6 +268,7 @@ def register_telegram_webhook_routes(
                 await _run_post_approval_execution_flow(
                     get_telegram_client=get_telegram_client,
                     get_agent_runtime=get_agent_runtime,
+                    get_context_events=get_context_events,
                     approval_id=approval_id,
                     decision_payload=result if isinstance(result, dict) else {},
                     chat_id=callback_chat_id,
@@ -272,6 +303,7 @@ def register_telegram_webhook_routes(
                 await _run_post_approval_execution_flow(
                     get_telegram_client=get_telegram_client,
                     get_agent_runtime=get_agent_runtime,
+                    get_context_events=get_context_events,
                     approval_id=approval_id,
                     decision_payload=result if isinstance(result, dict) else {},
                     chat_id=int(chat_id),
