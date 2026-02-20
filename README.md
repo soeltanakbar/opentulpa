@@ -104,8 +104,10 @@ See `.env.example`. Most important:
 - `LLM_MODEL` (default `gemini-3-flash-preview`)
 - `OPENROUTER_BASE_URL`
 - `OPENROUTER_EMBEDDING_MODEL`
-- `AGENT_CONTEXT_TOKEN_LIMIT` (default `250000`)
-- `AGENT_CONTEXT_ROLLUP_TOKENS` (default `100000`)
+- `AGENT_CONTEXT_TOKEN_LIMIT` (default `40000`, short-term high-watermark)
+- `AGENT_CONTEXT_RECENT_TOKENS` (default `20000`, short-term low-watermark target)
+- `AGENT_CONTEXT_ROLLUP_TOKENS` (default `5000`)
+- `AGENT_CONTEXT_COMPACTION_SOURCE_TOKENS` (default `100000`)
 - `BROWSER_USE_API_KEY` / `BROWSER_USE_BASE_URL` (optional browser automation)
 
 ## Safety Model (External Impact)

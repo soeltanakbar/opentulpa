@@ -113,8 +113,10 @@ class OpenTulpaLangGraphRuntime:
         context_events: EventContextService | None = None,
         customer_profile_service: CustomerProfileService | None = None,
         thread_rollup_service: ThreadRollupService | None = None,
-        context_token_limit: int = 250000,
-        context_rollup_tokens: int = 100000,
+        context_token_limit: int = 40000,
+        context_rollup_tokens: int = 5000,
+        context_recent_tokens: int = 20000,
+        context_compaction_source_tokens: int = 100000,
         input_debounce_seconds: float = 0.65,
     ) -> None:
         self.app_url = app_url.rstrip("/")
@@ -125,8 +127,22 @@ class OpenTulpaLangGraphRuntime:
         self._context_events = context_events
         self._customer_profile_service = customer_profile_service
         self._thread_rollup_service = thread_rollup_service
-        self._context_token_limit = max(50000, int(context_token_limit))
-        self._context_rollup_tokens = max(10000, int(context_rollup_tokens))
+        self._context_token_limit = max(10000, int(context_token_limit))
+        self._context_short_term_high_tokens = max(2000, int(context_token_limit))
+        self._context_short_term_low_tokens = min(
+            max(1000, int(context_recent_tokens)),
+            max(1000, self._context_short_term_high_tokens - 500),
+        )
+        self._context_rollup_tokens = min(
+            max(500, int(context_rollup_tokens)),
+            max(500, self._context_token_limit - 1000),
+        )
+        # Backward-compat aliases consumed by existing helpers/tests.
+        self._context_recent_tokens = self._context_short_term_low_tokens
+        self._context_compaction_source_tokens = max(
+            self._context_rollup_tokens,
+            int(context_compaction_source_tokens),
+        )
         self._input_debounce_seconds = max(0.0, min(float(input_debounce_seconds), 3.0))
 
         self._model = init_chat_model(
@@ -533,17 +549,28 @@ class OpenTulpaLangGraphRuntime:
         if not tid or self._thread_rollup_service is None:
             return None
         try:
-            return self._thread_rollup_service.get_rollup(tid)
+            text = self._thread_rollup_service.get_rollup(tid)
+            return self._cap_rollup_text(text)
         except Exception:
             return None
 
     def _save_thread_rollup(self, thread_id: str, rollup: str) -> None:
         tid = str(thread_id or "").strip()
-        text = str(rollup or "").strip()
+        text = self._cap_rollup_text(rollup)
         if not tid or not text or self._thread_rollup_service is None:
             return
         with suppress(Exception):
             self._thread_rollup_service.set_rollup(tid, text)
+
+    def _cap_rollup_text(self, text: str | None) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        max_chars = max(800, int(self._context_rollup_tokens) * 4)
+        if len(raw) <= max_chars:
+            return raw
+        reserve = max(200, max_chars // 2 - 8)
+        return f"{raw[:reserve]}\n...\n{raw[-reserve:]}"
 
     @staticmethod
     def _extract_docx_text(raw_bytes: bytes) -> str:

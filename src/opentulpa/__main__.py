@@ -129,7 +129,9 @@ def main() -> None:
             customer_profile_service=customer_profiles,
             thread_rollup_service=thread_rollups,
             context_token_limit=settings.agent_context_token_limit,
+            context_recent_tokens=settings.agent_context_recent_tokens,
             context_rollup_tokens=settings.agent_context_rollup_tokens,
+            context_compaction_source_tokens=settings.agent_context_compaction_source_tokens,
         )
     else:
         print(

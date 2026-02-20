@@ -2,7 +2,7 @@
 
 Auto-generated index of instruments, skills, integration files, and artifacts.
 
-Generated: 2026-02-20T06:58:14.528688+00:00
+Generated: 2026-02-20T07:34:24.174961+00:00
 
 ## Roots
 
@@ -14,6 +14,9 @@ Generated: 2026-02-20T06:58:14.528688+00:00
 
 ## Recent Entries
 
+- `tulpa_stuff/valid_router_bb96107f4342459e866a49515993227c.py` (tulpa_stuff) updated `2026-02-20T07:34:24.174961+00:00`
+- `tulpa_stuff/valid_router_9c5362c930ba44bfae80a6a2c0ebedb5.py` (tulpa_stuff) updated `2026-02-20T07:29:37.316799+00:00`
+- `tulpa_stuff/valid_router_0f1afb0248cb4aa5a861cdc2d66d8964.py` (tulpa_stuff) updated `2026-02-20T07:28:35.440761+00:00`
 - `tulpa_stuff/valid_router_6e91ef9368c14b73b0ae512d7388b8d6.py` (tulpa_stuff) updated `2026-02-20T06:58:14.528688+00:00`
 - `tulpa_stuff/valid_router_f49e8b30e88044b1862a555989db61c7.py` (tulpa_stuff) updated `2026-02-20T06:57:22.000435+00:00`
 - `tulpa_stuff/valid_router_aa8d8b619efb4b6b912da80ad4408a88.py` (tulpa_stuff) updated `2026-02-20T06:54:55.171097+00:00`

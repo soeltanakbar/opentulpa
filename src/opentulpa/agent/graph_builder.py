@@ -91,6 +91,8 @@ def build_runtime_graph(runtime: Any):
             "call fetch_link_content first (do not rely only on web_search). "
             "When users refer to files they uploaded earlier (e.g. 'the table/orders file'), "
             "use uploaded_file_search, then uploaded_file_get/uploaded_file_analyze/uploaded_file_send as needed. "
+            "When you are unsure about prior user-specific facts/preferences/IDs because they are not in short-term context, "
+            "call memory_search before asking the user to repeat themselves. "
             "When users ask to send an image from the web, use web_search to find candidate URLs, "
             "then call web_image_send (it validates URL content-type is image/* before sending). "
             "When a task needs real interactive browsing (dynamic pages, multi-step navigation, "

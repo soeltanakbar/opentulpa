@@ -29,16 +29,28 @@ class Settings(BaseSettings):
         description="Maximum LangGraph steps per turn.",
     )
     agent_context_token_limit: int = Field(
-        default=250000,
-        ge=50000,
+        default=40000,
+        ge=10000,
         le=1000000,
-        description="Estimated token ceiling before thread context compaction.",
+        description="Short-term high-watermark (estimated tokens) before thread context compaction.",
+    )
+    agent_context_recent_tokens: int = Field(
+        default=20000,
+        ge=1000,
+        le=1000000,
+        description="Short-term low-watermark target (estimated tokens) after compaction.",
     )
     agent_context_rollup_tokens: int = Field(
-        default=100000,
-        ge=10000,
+        default=5000,
+        ge=500,
         le=300000,
-        description="Estimated oldest token span to summarize during compaction.",
+        description="Estimated token budget for compressed older-context rollup.",
+    )
+    agent_context_compaction_source_tokens: int = Field(
+        default=100000,
+        ge=1000,
+        le=500000,
+        description="Max oldest-token span folded into rollup in one compaction pass.",
     )
     approvals_db_path: str = Field(
         default=".opentulpa/pending_approvals.db",

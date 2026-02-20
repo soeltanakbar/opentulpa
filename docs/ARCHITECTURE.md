@@ -49,6 +49,12 @@ Debounce/coalescing is implemented in the agent runtime (not transport):
 
 This behavior is per-thread and interface-agnostic.
 
+## Context window policy
+
+- Short-term context uses hysteresis: compact only when it reaches ~40k estimated tokens.
+- After compaction, short-term context is reduced toward ~20k tokens.
+- Older context (up to ~100k tokens per pass) is folded into a ~5k rollup injected at prompt top.
+
 ## Approval guardrail flow
 
 1. Tool precheck calls `/internal/approvals/evaluate`.

@@ -17,6 +17,78 @@ from opentulpa.agent.utils import (
 )
 
 
+def _rollup_token_budget(runtime: Any) -> int:
+    return max(500, int(getattr(runtime, "_context_rollup_tokens", 5000)))
+
+
+def _short_term_high_token_budget(runtime: Any) -> int:
+    configured = int(
+        getattr(
+            runtime,
+            "_context_short_term_high_tokens",
+            getattr(runtime, "_context_token_limit", 40000),
+        )
+    )
+    return max(2000, configured)
+
+
+def _short_term_low_token_budget(runtime: Any) -> int:
+    configured = int(
+        getattr(
+            runtime,
+            "_context_short_term_low_tokens",
+            getattr(runtime, "_context_recent_tokens", 20000),
+        )
+    )
+    high = _short_term_high_token_budget(runtime)
+    return max(1000, min(configured, max(1000, high - 500)))
+
+
+def _compaction_source_budget(runtime: Any) -> int:
+    return max(
+        _rollup_token_budget(runtime),
+        int(getattr(runtime, "_context_compaction_source_tokens", 100000)),
+    )
+
+
+def _trim_text_to_token_budget(text: str, token_budget: int) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    budget = max(1, int(token_budget))
+    if _approx_tokens(raw) <= budget:
+        return raw
+
+    max_chars = max(800, budget * 4)
+    if len(raw) <= max_chars:
+        return raw
+
+    # Keep both earliest and latest sections to preserve stable preferences and newest updates.
+    reserve = max(20, max_chars // 2 - 8)
+    compact = f"{raw[:reserve]}\n...\n{raw[-reserve:]}"
+    while _approx_tokens(compact) > budget and reserve > 64:
+        reserve = max(64, int(reserve * 0.85))
+        compact = f"{raw[:reserve]}\n...\n{raw[-reserve:]}"
+    if _approx_tokens(compact) <= budget:
+        return compact.strip()
+    return raw[:max_chars].strip()
+
+
+def _select_split_index(message_tokens: list[int], *, tokens_to_compact: int) -> int:
+    if not message_tokens or len(message_tokens) <= 1 or tokens_to_compact <= 0:
+        return 0
+    consumed = 0
+    split_idx = 0
+    for idx, tok in enumerate(message_tokens):
+        consumed += max(0, int(tok))
+        split_idx = idx + 1
+        if consumed >= tokens_to_compact and split_idx < len(message_tokens):
+            break
+    if split_idx >= len(message_tokens):
+        split_idx = len(message_tokens) - 1
+    return max(0, split_idx)
+
+
 def split_text_chunks(text: str, *, approx_tokens_per_chunk: int = 25000) -> list[str]:
     raw = str(text or "").strip()
     if not raw:
@@ -48,10 +120,14 @@ def split_text_chunks(text: str, *, approx_tokens_per_chunk: int = 25000) -> lis
 
 
 async def compress_rollup(runtime: Any, existing_rollup: str, additional_text: str) -> str:
-    running = str(existing_rollup or "").strip()
-    chunks = split_text_chunks(additional_text, approx_tokens_per_chunk=25000)
+    rollup_budget = _rollup_token_budget(runtime)
+    running = _trim_text_to_token_budget(str(existing_rollup or "").strip(), rollup_budget)
+    chunk_budget = min(25000, _compaction_source_budget(runtime))
+    chunks = split_text_chunks(additional_text, approx_tokens_per_chunk=chunk_budget)
     if not chunks:
         return running
+    existing_chars = max(4000, rollup_budget * 4)
+    chunk_chars = max(20000, _compaction_source_budget(runtime) * 4)
     for chunk in chunks:
         response = await runtime._model.ainvoke(
             [
@@ -70,15 +146,16 @@ async def compress_rollup(runtime: Any, existing_rollup: str, additional_text: s
                 HumanMessage(
                     content=(
                         "Existing compressed context (may be empty):\n"
-                        f"{running[:12000]}\n\n"
+                        f"{running[:existing_chars]}\n\n"
                         "Older conversation segment to fold in:\n"
-                        f"{chunk[:120000]}"
+                        f"{str(chunk or '')[:chunk_chars]}"
                     )
                 ),
             ]
         )
         running = _content_to_text(getattr(response, "content", "")).strip() or running
-    return running[:30000]
+        running = _trim_text_to_token_budget(running, rollup_budget)
+    return _trim_text_to_token_budget(running, rollup_budget)
 
 
 async def persist_rollup_memory(
@@ -131,7 +208,10 @@ async def maybe_compact_thread_context(
         return
 
     config = {"configurable": {"thread_id": tid}, "recursion_limit": runtime.recursion_limit}
-    for _ in range(3):
+    short_term_high_budget = _short_term_high_token_budget(runtime)
+    short_term_low_budget = _short_term_low_token_budget(runtime)
+    source_budget = _compaction_source_budget(runtime)
+    for _ in range(8):
         try:
             snapshot = await runtime._graph.aget_state(config=config)
             values = getattr(snapshot, "values", {}) or {}
@@ -141,17 +221,14 @@ async def maybe_compact_thread_context(
             message_texts = [_message_to_text(m) for m in state_messages]
             message_tokens = [_approx_tokens(t) for t in message_texts]
             total_tokens = sum(message_tokens)
-            if total_tokens <= runtime._context_token_limit:
+            # Hysteresis window: compact only at/above high watermark.
+            if total_tokens < short_term_high_budget:
                 return
 
-            target_tokens = min(runtime._context_rollup_tokens, total_tokens)
-            consumed = 0
-            split_idx = 0
-            for idx, tok in enumerate(message_tokens):
-                consumed += tok
-                split_idx = idx + 1
-                if consumed >= target_tokens and split_idx < len(state_messages):
-                    break
+            # Compact enough oldest context to move back near low watermark.
+            overflow_tokens = total_tokens - short_term_low_budget
+            target_tokens = min(source_budget, overflow_tokens)
+            split_idx = _select_split_index(message_tokens, tokens_to_compact=target_tokens)
             if split_idx <= 0:
                 return
 
