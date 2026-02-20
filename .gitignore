@@ -21,10 +21,9 @@ __pycache__/
 *.log.old
 
 # Agent-generated/user runtime artifacts
-tulpa_stuff/.tulpa_catalog.json
-tulpa_stuff/artifacts/
-tulpa_stuff/*.py
-!tulpa_stuff/__init__.py
+tulpa_stuff/**
+!tulpa_stuff/**/
+tulpa_stuff/artifacts/**
 docs/SCRATCHPAD.md
 
 # IDE / OS
