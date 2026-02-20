@@ -10,6 +10,7 @@ from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
 from opentulpa.api.app import create_app
 from opentulpa.context.customer_profiles import CustomerProfileService
 from opentulpa.context.file_vault import FileVaultService
+from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.context.thread_rollups import ThreadRollupService
 from opentulpa.core.config import get_settings
@@ -106,6 +107,12 @@ def main() -> None:
         db_path=project_root / ".opentulpa" / "file_vault.db",
     )
     thread_rollups = ThreadRollupService(db_path=project_root / ".opentulpa" / "thread_rollups.db")
+    link_alias_db = Path(settings.link_alias_db_path)
+    if not link_alias_db.is_absolute():
+        link_alias_db = project_root / link_alias_db
+    link_aliases = LinkAliasService(
+        db_path=link_alias_db,
+    )
     skill_store = SkillStoreService(
         db_path=project_root / ".opentulpa" / "skills.db",
         root_dir=project_root / ".opentulpa" / "skills",
@@ -128,6 +135,7 @@ def main() -> None:
             context_events=context_events,
             customer_profile_service=customer_profiles,
             thread_rollup_service=thread_rollups,
+            link_alias_service=link_aliases,
             context_token_limit=settings.agent_context_token_limit,
             context_recent_tokens=settings.agent_context_recent_tokens,
             context_rollup_tokens=settings.agent_context_rollup_tokens,
@@ -149,6 +157,7 @@ def main() -> None:
         context_events=context_events,
         customer_profile_service=customer_profiles,
         file_vault_service=file_vault,
+        link_alias_service=link_aliases,
         skill_store_service=skill_store,
     )
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")

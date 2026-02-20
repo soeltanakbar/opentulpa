@@ -478,7 +478,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         customer_id: str,
         allowed_domains: list[str] | None = None,
         max_steps: int = 20,
-        wait_timeout_seconds: int = 180,
+        wait_timeout_seconds: int = 600,
         poll_interval_seconds: int = 4,
         llm: str = "browser-use-llm",
         start_url: str | None = None,
@@ -497,7 +497,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
             return {"error": "browser_use_run requires a non-empty task"}
 
         safe_max_steps = max(1, min(int(max_steps), 80))
-        safe_wait_timeout = max(20, min(int(wait_timeout_seconds), 900))
+        safe_wait_timeout = max(30, min(int(wait_timeout_seconds), 1800))
         safe_poll_interval = max(2, min(int(poll_interval_seconds), 30))
         safe_domains = _normalize_allowed_domains(allowed_domains)
         safe_llm = str(llm or "").strip() or "browser-use-llm"
@@ -1050,8 +1050,8 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
             "POST",
             "/internal/approvals/execute",
             json_body={"approval_id": aid, "customer_id": customer_id},
-            timeout=90.0,
-            retries=1,
+            timeout=600.0,
+            retries=0,
         )
         if r.status_code != 200:
             return {"error": f"guardrail_execute_approved_action failed: {r.text}"}

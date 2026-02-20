@@ -59,6 +59,15 @@ def register_approval_routes(
                 resolved["wake_queue_id"] = queue_id
             except Exception:
                 resolved["wake_queued"] = False
+        if bool(resolved.get("ok")):
+            approval_id = str(resolved.get("id", approval_id)).strip()
+            if approval_id:
+                group = broker.get_approval_group_status(
+                    approval_id=approval_id,
+                    window_seconds=60,
+                )
+                if isinstance(group, dict):
+                    resolved["approval_group"] = group
         return resolved
 
     @app.post("/internal/approvals/evaluate")

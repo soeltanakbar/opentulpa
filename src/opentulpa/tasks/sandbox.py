@@ -7,6 +7,7 @@ import contextlib
 import os
 import shlex
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,11 @@ INTERFACES_DIR = (PACKAGE_ROOT / "interfaces").resolve()
 TOOLS_DIR = (PACKAGE_ROOT / "tools").resolve()
 SKILLS_DIR = (PACKAGE_ROOT / "skills").resolve()
 REPO_VENV_DIR = (PROJECT_ROOT / ".venv").resolve()
+AGENT_VENV_DIR = (
+    Path(os.environ.get("OPENTULPA_AGENT_VENV_PATH", "")).expanduser().resolve()
+    if str(os.environ.get("OPENTULPA_AGENT_VENV_PATH", "")).strip()
+    else (PROJECT_ROOT / ".opentulpa" / "agent_venv").resolve()
+)
 ARTIFACTS_ROOT = (TULPA_STUFF_DIR / "artifacts").resolve()
 CATALOG_PATH = (TULPA_STUFF_DIR / ".tulpa_catalog.json").resolve()
 CATALOG_README_PATH = (TULPA_STUFF_DIR / "README.md").resolve()
@@ -280,6 +286,44 @@ def run_terminal(
     timeout_seconds: int = 90,
     extra_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    def _ensure_agent_venv() -> Path:
+        if AGENT_VENV_DIR.exists():
+            return AGENT_VENV_DIR
+        AGENT_VENV_DIR.parent.mkdir(parents=True, exist_ok=True)
+        _debug_log(
+            hypothesis_id="H1",
+            location="tasks/sandbox.py:run_terminal",
+            message="agent_venv_create_start",
+            data={"venv_path": str(AGENT_VENV_DIR)},
+        )
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "venv", str(AGENT_VENV_DIR)],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=True,
+            )
+        except Exception as exc:
+            _debug_log(
+                hypothesis_id="H4",
+                location="tasks/sandbox.py:run_terminal",
+                message="agent_venv_create_failed",
+                data={"venv_path": str(AGENT_VENV_DIR), "error": str(exc)},
+            )
+            raise RuntimeError(
+                f"Agent venv setup failed at {AGENT_VENV_DIR}. "
+                "Create it manually with: python3 -m venv .opentulpa/agent_venv"
+            ) from exc
+        _debug_log(
+            hypothesis_id="H1",
+            location="tasks/sandbox.py:run_terminal",
+            message="agent_venv_create_ok",
+            data={"venv_path": str(AGENT_VENV_DIR)},
+        )
+        return AGENT_VENV_DIR
+
     cmd = str(command).strip()
     if not cmd:
         raise ValueError("command is required")
@@ -315,24 +359,15 @@ def run_terminal(
         )
         # endregion
         raise PermissionError(f"command '{parts[0]}' is not allowed")
-    if not REPO_VENV_DIR.exists():
-        # region agent log
-        _debug_log(
-            hypothesis_id="H4",
-            location="tasks/sandbox.py:run_terminal",
-            message="venv_missing",
-            data={"venv_path": str(REPO_VENV_DIR.relative_to(PROJECT_ROOT))},
-        )
-        # endregion
-        raise RuntimeError(
-            "Repository virtual environment not found at .venv. Run 'uv sync' first."
-        )
+    agent_venv_dir = _ensure_agent_venv()
 
     cwd = ALLOWED_TERMINAL_DIRS[working_dir]
     cwd.mkdir(parents=True, exist_ok=True)
     run_env = os.environ.copy()
-    run_env["VIRTUAL_ENV"] = str(REPO_VENV_DIR)
-    run_env["PATH"] = f"{REPO_VENV_DIR / 'bin'}:{run_env.get('PATH', '')}"
+    run_env["VIRTUAL_ENV"] = str(agent_venv_dir)
+    run_env["PATH"] = f"{agent_venv_dir / 'bin'}:{run_env.get('PATH', '')}"
+    run_env["PIP_REQUIRE_VIRTUALENV"] = "true"
+    run_env["UV_PROJECT_ENVIRONMENT"] = str(agent_venv_dir)
     if extra_env:
         run_env.update(extra_env)
 
@@ -355,7 +390,7 @@ def run_terminal(
         "stdout": (proc.stdout or "")[-12000:],
         "stderr": (proc.stderr or "")[-12000:],
         "cwd": str(cwd.relative_to(PROJECT_ROOT)),
-        "venv": str(REPO_VENV_DIR.relative_to(PROJECT_ROOT)),
+        "venv": str(agent_venv_dir.relative_to(PROJECT_ROOT)),
     }
     # region agent log
     _debug_log(

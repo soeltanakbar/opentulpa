@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from opentulpa.approvals.adapters.base import ApprovalAdapter
@@ -62,6 +64,25 @@ _TERMINAL_POST_HINTS = (
     "discord",
     "telegram",
     "publish",
+)
+_TERMINAL_NETWORK_HINTS = (
+    "curl ",
+    "wget ",
+    "http://",
+    "https://",
+    "requests",
+    "httpx",
+    "urllib",
+    "aiohttp",
+    "smtp",
+    "imap",
+    "pop3",
+    "slack",
+    "whatsapp",
+    "discord",
+    "telegram",
+    "mailgun",
+    "twilio",
 )
 _PURCHASE_HINTS = ("buy", "checkout", "purchase", "invoice", "payment", "charge", "transfer")
 _BROWSER_WRITE_HINTS = (
@@ -182,7 +203,7 @@ class ApprovalBroker:
         origin_conversation_id: str,
         origin_user_id: str,
     ) -> RecipientScope:
-        if action_name in {"uploaded_file_send", "web_image_send"}:
+        if action_name in {"uploaded_file_send", "web_image_send", "tulpa_write_file"}:
             return "self"
         if action_name in EXTERNAL_DEFAULT_ACTIONS:
             return "external"
@@ -226,6 +247,13 @@ class ApprovalBroker:
                 return "write", "unknown"
             return "read", "unknown"
         return "write", "self"
+
+    @staticmethod
+    def _terminal_has_external_hint(command: str) -> bool:
+        cmd = str(command or "").strip().lower()
+        if not cmd:
+            return False
+        return any(hint in cmd for hint in _TERMINAL_NETWORK_HINTS)
 
     @staticmethod
     def _classify_browser_task(task: str) -> str:
@@ -319,7 +347,16 @@ class ApprovalBroker:
         reason = "policy_matrix"
         confidence = 0.7
         llm_uncertain = False
-        if action_name in {"browser_use_run", "browser_use_task_control", "tulpa_run_terminal"}:
+        should_llm_classify = action_name in {"browser_use_run", "browser_use_task_control"}
+        if action_name == "tulpa_run_terminal":
+            cmd = str(action_args.get("command", ""))
+            should_llm_classify = self._terminal_has_external_hint(cmd)
+            if not should_llm_classify:
+                # Local terminal commands are internal/self-impact and should not
+                # trigger external-impact approvals.
+                reason = "local_terminal_command"
+                confidence = max(confidence, 0.9)
+        if should_llm_classify:
             hint = await self._llm_intent_hint(action_name=action_name, action_args=action_args)
             if hint.get("ok"):
                 impact = _parse_impact(hint.get("impact_type"), default=impact)
@@ -508,6 +545,64 @@ class ApprovalBroker:
 
     def get(self, approval_id: str) -> dict[str, Any] | None:
         return self._store.as_dict(self._store.get(approval_id))
+
+    def get_approval_group_status(
+        self,
+        *,
+        approval_id: str,
+        window_seconds: int = 60,
+    ) -> dict[str, Any] | None:
+        record = self._store.get(approval_id)
+        if record is None:
+            return None
+        related = self._store.list_thread_window(
+            customer_id=record.customer_id,
+            thread_id=record.thread_id,
+            anchor_created_at=record.created_at,
+            window_seconds=window_seconds,
+        )
+        if not related:
+            related = [record]
+
+        def _parse_dt(value: str) -> datetime:
+            dt = datetime.fromisoformat(str(value or "").strip())
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+
+        created_points: list[datetime] = []
+        for item in related:
+            with suppress(Exception):
+                created_points.append(_parse_dt(item.created_at))
+        group_start = min(created_points) if created_points else _parse_dt(record.created_at)
+        deadline = group_start + timedelta(seconds=max(1, int(window_seconds)))
+        now = self._store.utc_now()
+        window_open = now <= deadline
+
+        ids = [item.id for item in related]
+        pending_ids = [item.id for item in related if item.status == "pending"]
+        approved_ids = [item.id for item in related if item.status == "approved"]
+        executed_ids = [item.id for item in related if item.status == "executed"]
+        denied_ids = [item.id for item in related if item.status == "denied"]
+        expired_ids = [item.id for item in related if item.status == "expired"]
+
+        executable_ids: list[str] = []
+        if window_open and not pending_ids and not denied_ids and not expired_ids:
+            executable_ids = approved_ids
+
+        return {
+            "window_seconds": int(window_seconds),
+            "window_open": bool(window_open),
+            "group_start_at": group_start.isoformat(),
+            "deadline_at": deadline.isoformat(),
+            "all_ids": ids,
+            "pending_ids": pending_ids,
+            "approved_ids": approved_ids,
+            "executed_ids": executed_ids,
+            "denied_ids": denied_ids,
+            "expired_ids": expired_ids,
+            "executable_ids": executable_ids,
+        }
 
     async def decide(
         self,

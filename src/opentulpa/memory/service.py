@@ -30,26 +30,62 @@ class MemoryService:
         messages: list[dict[str, str]],
         user_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        infer: bool = True,
+        retries: int = 1,
     ) -> Any:
         """Add conversation or messages to memory."""
         uid = user_id or self._user_id
-        return self._get_memory().add(
-            messages,
-            user_id=uid,
-            metadata=metadata or {},
-        )
+        mem = self._get_memory()
+        attempts = max(0, int(retries)) + 1
+        last_result: Any = None
+        for _ in range(attempts):
+            try:
+                result = mem.add(
+                    messages,
+                    user_id=uid,
+                    metadata=metadata or {},
+                    infer=bool(infer),
+                )
+            except TypeError:
+                # Compatibility path for mem0 versions that don't expose infer kwarg.
+                result = mem.add(
+                    messages,
+                    user_id=uid,
+                    metadata=metadata or {},
+                )
+
+            last_result = result
+            if not bool(infer):
+                return result
+
+            # mem0 may swallow malformed JSON from LLM and return empty results.
+            # Retry once to recover transient malformed-output failures.
+            if isinstance(result, dict):
+                results = result.get("results")
+                if isinstance(results, list) and results:
+                    return result
+            elif isinstance(result, list):
+                if result:
+                    return result
+            else:
+                return result
+        return last_result
 
     def add_text(
         self,
         text: str,
         user_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        infer: bool = True,
+        retries: int = 1,
     ) -> Any:
-        """Add a single text as a user message (mem0 will infer)."""
+        """Add a single text as a user message (mem0 infer/update flow)."""
         return self.add(
             [{"role": "user", "content": text}],
             user_id=user_id,
             metadata=metadata,
+            infer=infer,
+            retries=retries,
         )
 
     def search(

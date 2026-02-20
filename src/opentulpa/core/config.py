@@ -52,6 +52,10 @@ class Settings(BaseSettings):
         le=500000,
         description="Max oldest-token span folded into rollup in one compaction pass.",
     )
+    link_alias_db_path: str = Field(
+        default=".opentulpa/link_aliases.db",
+        description="SQLite path for customer-scoped long-link alias registry.",
+    )
     approvals_db_path: str = Field(
         default=".opentulpa/pending_approvals.db",
         description="SQLite path for external-impact pending approvals.",

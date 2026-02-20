@@ -22,7 +22,15 @@ def register_memory_routes(
         messages = body.get("messages", [])
         user_id = body.get("user_id") or mem.user_id
         metadata = body.get("metadata") or {}
-        result = mem.add(messages, user_id=user_id, metadata=metadata)
+        infer = bool(body.get("infer", True))
+        retries = int(body.get("retries", 1) or 1)
+        result = mem.add(
+            messages,
+            user_id=user_id,
+            metadata=metadata,
+            infer=infer,
+            retries=retries,
+        )
         return {"ok": True, "result": result}
 
     @app.post("/internal/memory/search")

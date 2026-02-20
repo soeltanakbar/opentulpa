@@ -61,6 +61,9 @@ class PendingApprovalStore:
     def _utc_now() -> datetime:
         return datetime.now(timezone.utc)
 
+    def utc_now(self) -> datetime:
+        return self._utc_now()
+
     @staticmethod
     def _utc_now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -326,3 +329,36 @@ class PendingApprovalStore:
             "executed_at": record.executed_at,
             "decision_actor_id": record.decision_actor_id,
         }
+
+    def list_thread_window(
+        self,
+        *,
+        customer_id: str,
+        thread_id: str,
+        anchor_created_at: str,
+        window_seconds: int,
+    ) -> list[ApprovalRecord]:
+        cid = str(customer_id or "").strip()
+        tid = str(thread_id or "").strip()
+        if not cid or not tid:
+            return []
+        try:
+            anchor = datetime.fromisoformat(str(anchor_created_at or "").strip())
+        except Exception:
+            return []
+        if anchor.tzinfo is None:
+            anchor = anchor.replace(tzinfo=timezone.utc)
+        delta = timedelta(seconds=max(1, int(window_seconds)))
+        start = (anchor - delta).isoformat()
+        end = (anchor + delta).isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM pending_approvals
+                WHERE customer_id=? AND thread_id=? AND created_at>=? AND created_at<=?
+                ORDER BY created_at ASC
+                """,
+                (cid, tid, start, end),
+            ).fetchall()
+        return [self._row_to_record(row) for row in rows]

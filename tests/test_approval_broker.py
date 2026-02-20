@@ -137,10 +137,27 @@ async def test_classifier_failure_defaults_to_approval_required(tmp_path: Path) 
         customer_id="telegram_42",
         thread_id="chat-42",
         action_name="tulpa_run_terminal",
-        action_args={"command": "echo hi"},
+        action_args={"command": "curl -X POST https://example.com -d 'x=1'"},
     )
     assert result["gate"] == "require_approval"
     assert result["reason"] == "guardrail_uncertain"
+
+
+@pytest.mark.asyncio
+async def test_local_terminal_command_is_not_gated_even_if_classifier_unavailable(tmp_path: Path) -> None:
+    broker = ApprovalBroker(
+        store=PendingApprovalStore(db_path=tmp_path / "approvals.db"),
+        runtime=_ClassifierRuntime(),
+        adapters={"telegram": _CaptureAdapter()},
+        origin_resolver=_origin_resolver,
+    )
+    result = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="chat-42",
+        action_name="tulpa_run_terminal",
+        action_args={"command": "python3 gmail_setup.py"},
+    )
+    assert result["gate"] == "allow"
 
 
 @pytest.mark.asyncio
@@ -245,3 +262,51 @@ async def test_browser_task_duplicate_summary_after_executed_is_denied(tmp_path:
     assert again["gate"] == "deny"
     assert again["reason"] == "already_executed_recent_browser_task"
     assert again.get("approval_id") is None
+
+
+@pytest.mark.asyncio
+async def test_approval_group_waits_until_all_approved(tmp_path: Path) -> None:
+    broker = ApprovalBroker(
+        store=PendingApprovalStore(db_path=tmp_path / "approvals.db"),
+        runtime=_ClassifierRuntime(),
+        adapters={"telegram": _CaptureAdapter()},
+        origin_resolver=_origin_resolver,
+    )
+    first = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="chat-42",
+        action_name="slack_post",
+        action_args={"channel_id": "C1", "text": "one"},
+    )
+    second = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="chat-42",
+        action_name="email_send",
+        action_args={"to": "a@example.com", "text": "two"},
+    )
+    first_id = str(first.get("approval_id", "")).strip()
+    second_id = str(second.get("approval_id", "")).strip()
+    assert first_id and second_id and first_id != second_id
+
+    await broker.decide(
+        approval_id=first_id,
+        decision="approve",
+        actor_interface="telegram",
+        actor_id="42",
+    )
+    group_mid = broker.get_approval_group_status(approval_id=first_id, window_seconds=60)
+    assert isinstance(group_mid, dict)
+    assert second_id in group_mid["pending_ids"]
+    assert group_mid["executable_ids"] == []
+
+    await broker.decide(
+        approval_id=second_id,
+        decision="approve",
+        actor_interface="telegram",
+        actor_id="42",
+    )
+    group_done = broker.get_approval_group_status(approval_id=second_id, window_seconds=60)
+    assert isinstance(group_done, dict)
+    assert group_done["pending_ids"] == []
+    assert first_id in group_done["executable_ids"]
+    assert second_id in group_done["executable_ids"]

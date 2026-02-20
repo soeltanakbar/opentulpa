@@ -35,6 +35,7 @@ from opentulpa.approvals.broker import ApprovalBroker
 from opentulpa.approvals.store import PendingApprovalStore
 from opentulpa.context.customer_profiles import CustomerProfileService
 from opentulpa.context.file_vault import FileVaultService
+from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.core.config import get_settings
 from opentulpa.integrations.slack_client import grant_slack_write_consent, has_slack_write_consent
@@ -71,6 +72,7 @@ def create_app(
     context_events: EventContextService | None = None,
     customer_profile_service: CustomerProfileService | None = None,
     file_vault_service: FileVaultService | None = None,
+    link_alias_service: LinkAliasService | None = None,
     skill_store_service: SkillStoreService | None = None,
 ) -> FastAPI:
     """Create FastAPI app with internal API, webhook, and agent runtime."""
@@ -79,6 +81,7 @@ def create_app(
     slack_service = slack_client
     task_runner = task_service
     runtime = agent_runtime
+    settings = get_settings()
     context_events_service = context_events or EventContextService(
         db_path=PROJECT_ROOT / ".opentulpa" / "context_events.db"
     )
@@ -89,13 +92,18 @@ def create_app(
         root_dir=PROJECT_ROOT / ".opentulpa" / "file_vault",
         db_path=PROJECT_ROOT / ".opentulpa" / "file_vault.db",
     )
+    link_alias_db = Path(settings.link_alias_db_path)
+    if not link_alias_db.is_absolute():
+        link_alias_db = (PROJECT_ROOT / link_alias_db).resolve()
+    alias_service = link_alias_service or LinkAliasService(db_path=link_alias_db)
     skill_service = skill_store_service or SkillStoreService(
         db_path=PROJECT_ROOT / ".opentulpa" / "skills.db",
         root_dir=PROJECT_ROOT / ".opentulpa" / "skills",
     )
     skill_service.ensure_default_skill()
+    if runtime is not None and getattr(runtime, "_link_alias_service", None) is None:
+        setattr(runtime, "_link_alias_service", alias_service)
 
-    settings = get_settings()
     telegram_client = (
         TelegramClient(settings.telegram_bot_token) if settings.telegram_bot_token else None
     )

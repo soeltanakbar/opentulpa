@@ -91,6 +91,8 @@ def build_runtime_graph(runtime: Any):
             "call fetch_link_content first (do not rely only on web_search). "
             "When users refer to files they uploaded earlier (e.g. 'the table/orders file'), "
             "use uploaded_file_search, then uploaded_file_get/uploaded_file_analyze/uploaded_file_send as needed. "
+            "Use known link aliases (link_*) for very long URLs to reduce copy errors. "
+            "If you output a known alias ID, it will be expanded to full URL for the user. "
             "When you are unsure about prior user-specific facts/preferences/IDs because they are not in short-term context, "
             "call memory_search before asking the user to repeat themselves. "
             "When users ask to send an image from the web, use web_search to find candidate URLs, "
@@ -140,6 +142,10 @@ def build_runtime_graph(runtime: Any):
         active_directive = await runtime._load_active_directive(customer_id)
         thread_rollup = runtime._load_thread_rollup(thread_id)
         live_time = await runtime._build_live_time_context(customer_id)
+        link_alias_context = runtime._build_link_alias_context(
+            customer_id=customer_id,
+            user_text=latest_user,
+        )
         prompt_messages: list[AnyMessage] = [
             system_prompt,
             SystemMessage(
@@ -190,6 +196,8 @@ def build_runtime_graph(runtime: Any):
                     )
                 )
             )
+        if link_alias_context:
+            prompt_messages.append(SystemMessage(content=link_alias_context))
         response = await runtime._model_with_tools.ainvoke(
             [
                 *prompt_messages,
@@ -341,7 +349,14 @@ def build_runtime_graph(runtime: Any):
                         )
                         corrected_args["schedule"] = run_at_local.isoformat()
                     args = corrected_args
+                args = runtime.resolve_link_aliases_in_args(customer_id=customer_id, args=args)
                 result = await tool_fn.ainvoke(args)
+                runtime.register_links_from_text(
+                    customer_id=customer_id,
+                    text=_safe_json(result),
+                    source=f"tool:{call_name}",
+                    limit=40,
+                )
                 tool_messages.append(ToolMessage(content=_safe_json(result), tool_call_id=call_id))
             except Exception as exc:
                 had_error = True

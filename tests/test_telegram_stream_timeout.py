@@ -44,8 +44,16 @@ async def test_stream_timeout_returns_user_visible_timeout(monkeypatch: pytest.M
 
     # Force timeout path quickly.
     original_wait_for = relay_module.asyncio.wait_for
+    calls = {"count": 0}
 
     async def _fast_timeout(awaitable, timeout):
+        # Only force timeout for the stream-token wait path.
+        # Let other wait_for usages (e.g. loader stop_event waits) behave normally.
+        if asyncio.iscoroutine(awaitable):
+            code = getattr(awaitable, "cr_code", None)
+            if getattr(code, "co_name", "") == "wait":
+                return await original_wait_for(awaitable, timeout)
+        calls["count"] += 1
         raise asyncio.TimeoutError()
 
     monkeypatch.setattr(relay_module.asyncio, "wait_for", _fast_timeout)
@@ -64,5 +72,6 @@ async def test_stream_timeout_returns_user_visible_timeout(monkeypatch: pytest.M
     assert suppressed is False
     assert isinstance(final, str)
     assert "timed out" in final.lower()
+    # One automatic retry is attempted before surfacing timeout.
+    assert calls["count"] >= 2
     assert any("timed out" in text.lower() for _, text, _, _ in fake_client.calls)
-

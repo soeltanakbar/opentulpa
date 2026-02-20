@@ -2,7 +2,7 @@
 
 Auto-generated index of instruments, skills, integration files, and artifacts.
 
-Generated: 2026-02-20T07:55:13.766762+00:00
+Generated: 2026-02-20T10:24:39.390424+00:00
 
 ## Roots
 
@@ -14,6 +14,27 @@ Generated: 2026-02-20T07:55:13.766762+00:00
 
 ## Recent Entries
 
+- `tulpa_stuff/valid_router_2a67eb6a7a9647439d3697ee727664ff.py` (tulpa_stuff) updated `2026-02-20T10:24:39.390424+00:00`
+- `tulpa_stuff/valid_router_7e54b3fba2a24fc38366c3b6436e3a4a.py` (tulpa_stuff) updated `2026-02-20T10:22:34.791865+00:00`
+- `tulpa_stuff/valid_router_2fc6e15fbb5e429bb68e90e671703b79.py` (tulpa_stuff) updated `2026-02-20T10:14:50.419437+00:00`
+- `tulpa_stuff/gmail_get_link.py` (tulpa_stuff) updated `2026-02-20T10:00:51.216957+00:00`
+- `tulpa_stuff/gmail_check.py` (tulpa_stuff) updated `2026-02-20T10:00:13.531385+00:00`
+- `tulpa_stuff/gmail_token_exchange.py` (tulpa_stuff) updated `2026-02-20T10:00:05.027141+00:00`
+- `tulpa_stuff/gmail_setup_web.py` (tulpa_stuff) updated `2026-02-20T09:58:36.284153+00:00`
+- `tulpa_stuff/valid_router_e4c97ad695864c64978dbc831557a2a2.py` (tulpa_stuff) updated `2026-02-20T09:54:54.426571+00:00`
+- `tulpa_stuff/valid_router_f3e1df57815f4c62bb245117219e0fbb.py` (tulpa_stuff) updated `2026-02-20T09:54:31.863242+00:00`
+- `tulpa_stuff/gmail_setup.py` (tulpa_stuff) updated `2026-02-20T09:42:54.416915+00:00`
+- `tulpa_stuff/valid_router_e1f3e36a05e146d6bf3d364251f50752.py` (tulpa_stuff) updated `2026-02-20T09:41:57.911434+00:00`
+- `tulpa_stuff/valid_router_922f2e5849204118aad36fb4476b952d.py` (tulpa_stuff) updated `2026-02-20T09:41:44.037018+00:00`
+- `tulpa_stuff/valid_router_e87734fd7e094054a41d45ab0e0bdcc5.py` (tulpa_stuff) updated `2026-02-20T09:40:32.255698+00:00`
+- `tulpa_stuff/valid_router_dabfbe20a221403386515eb4450674c0.py` (tulpa_stuff) updated `2026-02-20T09:37:23.747886+00:00`
+- `tulpa_stuff/valid_router_f44b2774e5a1430fb288800e1c64ebe6.py` (tulpa_stuff) updated `2026-02-20T09:30:54.699449+00:00`
+- `tulpa_stuff/valid_router_ca314e39a99342f1bce03d22ff07098e.py` (tulpa_stuff) updated `2026-02-20T09:03:18.005412+00:00`
+- `tulpa_stuff/valid_router_0281ec1e995d404a898deb9877597bfe.py` (tulpa_stuff) updated `2026-02-20T09:02:25.625481+00:00`
+- `tulpa_stuff/valid_router_8245e1f0b959424aa191aed158960d11.py` (tulpa_stuff) updated `2026-02-20T08:58:35.986012+00:00`
+- `tulpa_stuff/valid_router_88f4ac627b2449edba34967371319ca4.py` (tulpa_stuff) updated `2026-02-20T08:55:10.032836+00:00`
+- `tulpa_stuff/valid_router_a8fb7ef55ea842798f94976f19f800ad.py` (tulpa_stuff) updated `2026-02-20T08:53:31.662051+00:00`
+- `tulpa_stuff/valid_router_815cf264d8c84c66b595cbe9c061f468.py` (tulpa_stuff) updated `2026-02-20T08:40:09.049771+00:00`
 - `tulpa_stuff/valid_router_dd7ce70ce4514197915c0cf24ec87cf6.py` (tulpa_stuff) updated `2026-02-20T07:55:13.766762+00:00`
 - `tulpa_stuff/valid_router_0cc4240a7ace4049b2915e9e566d0abf.py` (tulpa_stuff) updated `2026-02-20T07:49:47.481543+00:00`
 - `tulpa_stuff/valid_router_bb96107f4342459e866a49515993227c.py` (tulpa_stuff) updated `2026-02-20T07:34:24.174961+00:00`
