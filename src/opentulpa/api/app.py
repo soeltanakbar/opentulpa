@@ -400,6 +400,8 @@ def create_app(
     async def lifespan(app: FastAPI):
         loader = get_tulpa_loader()
         result = loader.reload()
+        if result.get("warnings"):
+            logger.info("Tulpa router load warnings: %s", result["warnings"])
         if result.get("errors"):
             logger.warning("Tulpa router load had errors: %s", result["errors"])
         if runtime and hasattr(runtime, "start"):

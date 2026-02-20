@@ -56,6 +56,7 @@ class TulpaRouterLoader:
 
         loaded: list[str] = []
         errors: list[dict[str, str]] = []
+        warnings: list[dict[str, str]] = []
 
         for module_name in self._module_names():
             try:
@@ -69,6 +70,19 @@ class TulpaRouterLoader:
                     tags=["tulpa"],
                 )
                 loaded.append(module_name)
+            except ModuleNotFoundError as exc:  # pragma: no cover - runtime guard
+                missing = str(getattr(exc, "name", "")).strip() or str(exc)
+                logger.warning(
+                    "Skipping tulpa module %s due to missing dependency: %s",
+                    module_name,
+                    missing,
+                )
+                warnings.append(
+                    {
+                        "module": module_name,
+                        "warning": f"missing dependency: {missing}",
+                    }
+                )
             except Exception as exc:  # pragma: no cover - runtime guard
                 logger.exception("Failed to load tulpa module %s: %s", module_name, exc)
                 errors.append({"module": module_name, "error": str(exc)})
@@ -76,6 +90,7 @@ class TulpaRouterLoader:
         return {
             "ok": True,
             "loaded": loaded,
+            "warnings": warnings,
             "errors": errors,
             "mount_prefix": "/tulpa/<module_name>",
         }

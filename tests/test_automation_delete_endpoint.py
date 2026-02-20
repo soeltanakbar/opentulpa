@@ -18,7 +18,7 @@ def _mk_client(tmp_path: Path) -> TestClient:
             schedule="0 * * * *",
             payload={
                 "customer_id": "telegram_1",
-                "cleanup_paths": ["tulpa_stuff/scripts/giphy_trending.py"],
+                "cleanup_paths": ["tulpa_stuff/scripts/example_worker.py"],
             },
             is_cron=True,
         )
@@ -49,7 +49,7 @@ def test_delete_automation_with_assets(tmp_path: Path, monkeypatch) -> None:
         payload = response.json()
         assert payload["ok"] is True
         assert payload["deleted_routines"] == [{"id": "rtn_auto1", "name": "Hourly Trending GIFs"}]
-        assert deleted_paths == [("tulpa_stuff/scripts/giphy_trending.py", True)]
+        assert deleted_paths == [("tulpa_stuff/scripts/example_worker.py", True)]
 
         listed = client.get("/internal/scheduler/routines", params={"customer_id": "telegram_1"})
         assert listed.status_code == 200

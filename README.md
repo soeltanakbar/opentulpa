@@ -1,141 +1,212 @@
 # OpenTulpa
 
-OpenTulpa is a safe personal agent backend for developers.
-It combines chat interfaces (Telegram today), tool-calling (LangGraph), memory (mem0), and automation (scheduler/tasks) so one assistant can reason, execute, and persist context across sessions while gating external-impact actions through approvals.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
+[![Self-Hosted](https://img.shields.io/badge/self--hosted-yes-green.svg)]()
 
-Developer-first personal agent runtime built on LangGraph, OpenRouter, and mem0.
+OpenTulpa is a personal AI agent you run on your own server, accessible through Telegram.
 
-OpenTulpa is optimized for building a reliable assistant you can actually modify: clear Python code, explicit action-time guardrails, persistent user context, and scheduler/task orchestration.
+It does two things most assistants don't:
 
-## Why OpenTulpa
+- **It knows you.** It remembers facts you tell it, files you send it, preferences you express, and context from every past conversation — and uses all of that without being asked.
+- **It builds its own tools.** Describe an API workflow and it writes the integration, runs it, schedules it, and saves it. You never touch code.
 
-- Pragmatic Python stack: FastAPI + LangGraph + SQLite + mem0.
-- Strong action safety model: external-impact operations require approval.
-- Persistent behavior control: per-user directive + timezone + memory.
-- Built for iterative automation: routines, wake queue, task artifacts, and tool calls.
-- Clean modular API surface: route modules split by concern.
+The longer you run it, the more personal and capable it gets.
 
-## OpenTulpa vs OpenClaw (dev view)
+> Two env vars. One command. A self-hosted agent that compounds over time.
 
-OpenClaw (from its README/docs) is broad and platform-heavy: many channels, apps, and ecosystem surface.
+---
 
-OpenTulpa takes a narrower stance:
+## What It Can Do
 
-- Scope: smaller surface area, easier to reason about and fork quickly.
-- Runtime model: in-process LangGraph with explicit tool APIs and checkpoints.
-- Safety posture: approval broker wired into execution path for external-impact effects.
-- Developer ergonomics: modular routes, explicit services, and straightforward extension points.
+### It Learns Who You Are
 
-If you want maximal channel/platform breadth, OpenClaw has more out-of-the-box surface.
-If you want a simpler codebase with explicit control over agent behavior and safety, OpenTulpa is usually easier to evolve.
+OpenTulpa remembers everything you share with it — not as a search index, but as context it actively uses when responding:
 
-## Strengths
+- Tell it your timezone, work schedule, or preferred tone or persona once — it applies that everywhere.
+- Send it a PDF, image, or voice note — it understands and stores it for later reference.
+- Mention a preference, a constraint, or a fact about your life — it factors that in unprompted from then on.
+- Share a document and say "keep this in mind" — it will, across future sessions.
 
-- Action-time guardrails, not brittle keyword matching.
-- Deterministic approval lifecycle (`pending -> approved/denied/expired -> executed`).
-- Per-user state model (directive overwrite, timezone profile, long-term memory).
-- Telegram-first UX with streaming, files, links, images, voice transcription.
-- Good refactorability: API routes separated into focused modules.
+Early conversations are generic. Later ones feel like talking to someone who actually knows your context and acts like it.
 
-## Capabilities
+### It Builds Its Own Integrations
 
-- Conversational assistant with persistent per-user identity (`telegram_<user_id>`), memory, directive, and timezone context.
-- Tool-driven web workflows: web search, exact link content retrieval, and browser automation tasks (when configured).
-- File intelligence: ingest/search/get/analyze uploaded files (PDF, DOCX, images, text, audio/voice).
-- Voice handling: transcribes Telegram voice notes and injects transcript into turn context.
-- Messaging/media actions: send stored files and web-fetched images back to user sessions.
-- Automation: create/list/delete scheduled routines, wake events, and task orchestration with artifacts.
-- Code/task execution path: sandboxed terminal/file operations for controlled automation tasks.
+Describe a workflow and OpenTulpa writes the code, runs it, schedules it, and saves it as a reusable skill — entirely from inside the chat. No dev environment. No context switching.
 
-## Use Cases
+```text
+"Pull the top 5 trending GIFs from Giphy and send me one every morning."
+→ Writes the Giphy API script, schedules the job, done.
 
-- Background integration worker: register and post to Moltbook through a scheduled/background workflow while preserving a consistent assistant personality and tone.
-- Market watcher: write scripts + custom parsers that run every few hours to fetch current stock data, generate analysis, and send compact updates.
-- API workflow builder: add API keys through chat setup, connect external APIs, and compose custom multi-step workflows by chatting with OpenTulpa.
-- Growth autopilot: create an AgentsMail identity, sign up to relevant resources/social networks, and publish posts based on trend signals.
-- Personal CRM + ops copilot: track contacts, reminders, follow-ups, and next actions.
-- Sales/research assistant: discover targets, enrich data, and draft outreach variants.
-- Inbox and notification triage: summarize noisy streams and escalate only important items.
-- Incident/runbook assistant: detect failures, collect diagnostics, suggest fixes, and notify.
+"Here's my Alpaca key. Give me a markets overview every weekday at 7am —
+top movers, my portfolio delta, any earnings today."
+→ Stores the key, writes the integration, registers the recurring job.
 
-## Skill System
+"Build me a Slack bot that posts a daily standup prompt to #engineering at 9am."
+→ Writes the full Slack integration from scratch, saves it as a reusable skill.
 
-OpenTulpa supports reusable skills as first-class runtime assets:
+"Register me on Moltbook." (with Browser Use connected)
+→ Opens a browser, fills the form, completes the flow autonomously.
 
-- Skill scopes: `user` and `global`, with user-overrides-global precedence.
-- Storage: each skill is persisted as `SKILL.md` (+ optional supporting files) and indexed in SQLite.
-- Runtime behavior: agent lists available skills, selects relevant ones via model reasoning, loads matched skill content, then executes with tool calls.
-- CRUD tooling: `skill_list`, `skill_get`, `skill_upsert`, `skill_delete`.
-- Default behavior: a built-in skill-creator baseline is provisioned so the agent can help users define new reusable workflows.
+"Here's my Notion token. Summarize everything updated this week into a digest."
+→ Done. Say "schedule that" and it registers the recurring job immediately.
 
-## Quick Start (Telegram in Minutes)
+"Write me a GitHub webhook that posts a Slack message on every failed CI run."
+→ Builds both ends of the integration, inside the chat, from a single message.
+```
 
-1. Create a Telegram bot with BotFather:
-   - Open Telegram, chat with `@BotFather`
-   - Run `/newbot`
-   - Copy the bot token
-2. Set the minimum env vars in `.env`:
+If there's a public API or a service with documentation, OpenTulpa can integrate it without you writing a single line of code. Hand it a key or describe a service → it figures out the API → writes working code → runs it → stores it so it never rebuilds from scratch.
+
+### Everything Else It Can Do
+
+- **Internet research:** browse URLs, read pages, summarize findings.
+- **Multimodal input:** send text, files, images, or voice notes — it handles all of them.
+- **Background automation:** scheduled tasks, recurring jobs, long-running routines.
+- **Artifact storage:** generated scripts and outputs are saved and reused across sessions.
+- **Skills:** recurring workflows become named capabilities it maintains, loads and applies automatically.
+
+---
+
+## Prerequisites
+
+- Python `3.10+`
+- [`uv`](https://docs.astral.sh/uv/) installed
+- Telegram bot token from `@BotFather`
+- `cloudflared` installed (recommended for local webhook tunneling)
+
+---
+
+## Quick Start
+
+**1. Create your Telegram bot:**
+- Chat with `@BotFather` → run `/newbot` → copy the token.
+- Open your new bot and press `Start`.
+
+**2. Configure:**
 
 ```bash
-OPENROUTER_API_KEY=your_openrouter_key
+cp .env.example .env
+```
+
+```bash
+# .env
+OPENROUTER_API_KEY=your_key
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 TELEGRAM_BOT_TOKEN=your_botfather_token
 ```
 
-3. Start OpenTulpa:
+Any OpenAI-compatible endpoint works — just swap the values above.
+
+**3. Start:**
 
 ```bash
 ./start.sh
 ```
 
-4. Ensure your Telegram webhook points to `/webhook/telegram` (via your tunnel/public URL setup), then send `/start` to your bot.
+`start.sh` will:
+- Start FastAPI on `:8000`
+- Launch a `cloudflared` tunnel
+- Auto-register the Telegram webhook at `<public_url>/webhook/telegram`
 
-That is enough to get a working personal agent.
+**4. Webhook (if not using cloudflared):**
 
-Health checks:
+```bash
+curl "https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook?url=https://yourdomain.com/webhook/telegram"
+```
 
+> Telegram requires a public URL. For local dev, `cloudflared` or `ngrok` both work.
+
+**5. Start chatting.** Try:
+
+```text
+Create a daily 8:30am Gmail summary and post the top 5 action items here.
+```
+
+**Stop:** `Ctrl+C` in the terminal.
+
+**Health checks:**
 - `http://localhost:8000/healthz`
 - `http://localhost:8000/agent/healthz`
 
-## Core Config
+---
 
-See `.env.example`. Most important:
+## Skills
 
-- `OPENROUTER_API_KEY`
-- `LLM_MODEL` (default `gemini-3-flash-preview`)
-- `OPENROUTER_BASE_URL`
-- `OPENROUTER_EMBEDDING_MODEL`
-- `AGENT_CONTEXT_TOKEN_LIMIT` (default `40000`, short-term high-watermark)
-- `AGENT_CONTEXT_RECENT_TOKENS` (default `20000`, short-term low-watermark target)
-- `AGENT_CONTEXT_ROLLUP_TOKENS` (default `5000`)
-- `AGENT_CONTEXT_COMPACTION_SOURCE_TOKENS` (default `100000`)
-- `BROWSER_USE_API_KEY` / `BROWSER_USE_BASE_URL` (optional browser automation)
+Skills are `SKILL.md` files the agent writes, stores, and loads on demand:
 
-## Safety Model (External Impact)
+- **Scopes:** `user` (personal) and `global` (shared) — `user` always takes priority.
+- **CRUD:** `skill_list`, `skill_get`, `skill_upsert`, `skill_delete`.
+- **Self-authoring:** OpenTulpa can write new skills directly from chat and reuse them in future sessions without being reminded.
 
-Approval checks happen at tool execution precheck.
+```text
+"Create a reusable skill called Customer Follow-up Writer that takes a thread
+summary and outputs 3 concise follow-up drafts in my tone."
+```
 
-- Self-targeted replies/files to the current user session: allowed.
-- External recipient or unknown scope + side effects/cost: approval required.
-- Unknown/uncertain classification: fail closed to approval.
-- Approvals are origin-user-only, single-use, and expire (default 10 min).
+---
 
-Failure behavior:
+## Configuration
 
-- Guardrail classifier errors default to approval-required.
-- Approval store/adapter failure blocks side-effect action.
-- Wake relay failures are captured to context events for recovery.
+**Required:**
 
-Use this before adding integrations:
+| Variable | Purpose |
+|---|---|
+| `OPENROUTER_API_KEY` | LLM routing and embeddings |
+| `TELEGRAM_BOT_TOKEN` | Telegram interface |
 
-- [`docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md`](docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md)
+**Optional:**
 
-## Architecture
+| Variable | Purpose |
+|---|---|
+| `BROWSER_USE_API_KEY` | Browser automation (form filling, web flows) |
 
-- `src/opentulpa/agent`: LangGraph runtime, graph, tools, context handling.
-- `src/opentulpa/api`: app composition.
-- `src/opentulpa/api/routes`: focused route modules (`health`, `files`, `skills`, `scheduler`, `tasks`, etc.).
-- `src/opentulpa/approvals`: policy, broker, adapters, persistence.
-- `src/opentulpa/interfaces/telegram`: transport client + chat orchestration.
-- `src/opentulpa/integrations`: web search and Browser Use clients.
-- `src/opentulpa/tasks`: sandboxed execution, task service, wake queue.
-- `tulpa_stuff`: dynamic/generated integration artifacts.
+**Core stack:** FastAPI · LangGraph · LangChain · mem0 · SQLite · APScheduler
+
+| Component | Role |
+|---|---|
+| `mem0` | Memory layer — persists user context across sessions |
+| `APScheduler` | Recurring jobs and background automation |
+| `SQLite` | Local persistence, no external DB required |
+
+**External services** (only active when you configure them):
+- OpenRouter — LLM routing and embeddings
+- Telegram Bot API
+- Browser Use Cloud *(optional)*
+- Any API you integrate yourself
+
+**Runtime data:**
+- `.opentulpa/` — memory, profiles, context
+- `tulpa_stuff/` — generated scripts and artifacts *(mostly gitignored)*
+
+---
+
+## Safety and Privacy
+
+- External-impact actions (writes, sends, posts) require explicit per-action approval — single-use, expiring, scoped to the requesting user only.
+- No built-in telemetry or user-tracking pipeline.
+- Fully open source (MIT). Self-hosted by default.
+- All runtime data stays local unless you explicitly configure an external service.
+
+---
+
+## Project Structure
+
+```
+src/opentulpa/
+├── agent/        # LangGraph runtime, graph, tool orchestration, context policy
+├── api/          # App composition and internal API routes
+├── interfaces/   # Telegram transport and streaming relay
+├── approvals/    # Guardrail policy, broker, adapters, persistence
+├── context/      # Profiles, memory events, file vault, rollups
+├── tasks/        # Sandboxed execution and task runner
+└── integrations/ # External service clients
+tulpa_stuff/      # Generated scripts and runtime artifacts
+```
+
+Reference docs:
+- [Architecture](docs/ARCHITECTURE.md)
+- [External Tool Safety Checklist](docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md)
+
+---
+
+*If this is useful to you, consider starring the repo — it helps others find it.*
