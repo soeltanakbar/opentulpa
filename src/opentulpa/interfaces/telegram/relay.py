@@ -9,6 +9,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
 
+from opentulpa.agent.runtime import MergedInputSuppressedError
 from opentulpa.core.ids import new_short_id
 from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.interfaces.telegram.constants import DEBUG_LOG_PATH, LOW_SIGNAL_REPLIES
@@ -90,7 +91,7 @@ async def stream_langgraph_reply_to_telegram(
     text: str,
     bot_token: str,
     chat_id: int,
-) -> str | None:
+ ) -> tuple[str | None, bool]:
     stream_message_id: int | None = None
     last_streamed = ""
     final_reply = None
@@ -110,38 +111,42 @@ async def stream_langgraph_reply_to_telegram(
             )
 
     loader_task = asyncio.create_task(_loader_loop())
-    async for partial in agent_runtime.astream_text(
-        thread_id=thread_id,
-        customer_id=customer_id,
-        text=text,
-    ):
-        if not isinstance(partial, str):
-            continue
-        current = partial.strip()
-        if not current or is_low_signal_reply(current) or current == last_streamed:
-            continue
-        if not loader_stop.is_set():
-            loader_stop.set()
-            with suppress(Exception):
-                await loader_task
-        stream_message_id = stream_state.get("message_id")
-        stream_message_id = (
-            await client.upsert_stream_message(
-                chat_id=chat_id,
-                text=current,
-                message_id=stream_message_id,
-                parse_mode="HTML",
+    suppressed = False
+    try:
+        async for partial in agent_runtime.astream_text(
+            thread_id=thread_id,
+            customer_id=customer_id,
+            text=text,
+        ):
+            if not isinstance(partial, str):
+                continue
+            current = partial.strip()
+            if not current or is_low_signal_reply(current) or current == last_streamed:
+                continue
+            if not loader_stop.is_set():
+                loader_stop.set()
+                with suppress(Exception):
+                    await loader_task
+            stream_message_id = stream_state.get("message_id")
+            stream_message_id = (
+                await client.upsert_stream_message(
+                    chat_id=chat_id,
+                    text=current,
+                    message_id=stream_message_id,
+                    parse_mode="HTML",
+                )
+                or stream_message_id
             )
-            or stream_message_id
-        )
-        last_streamed = current
-        final_reply = current
-        stream_state["message_id"] = stream_message_id
+            last_streamed = current
+            final_reply = current
+            stream_state["message_id"] = stream_message_id
+    except MergedInputSuppressedError:
+        suppressed = True
     if not loader_stop.is_set():
         loader_stop.set()
     with suppress(Exception):
         await loader_task
-    return final_reply
+    return final_reply, suppressed
 
 
 async def relay_task_event_via_main_agent(
@@ -192,17 +197,24 @@ async def relay_event_via_main_agent(
     replies: list[dict[str, Any]] = []
     for slot in slots:
         chat_id = int(slot["chat_id"])
-        state = state_store.load()
-        sessions = state.get("sessions", {})
-        raw_slot = sessions.get(str(chat_id), {}) if isinstance(sessions, dict) else {}
-        wake_thread_id = str(raw_slot.get("wake_thread_id", "")).strip()
-        if not wake_thread_id:
-            wake_thread_id = new_short_id("wake")
-            if isinstance(raw_slot, dict):
+        chat_key = str(chat_id)
+
+        def _ensure_wake_thread_id(state: dict[str, Any], _chat_key: str = chat_key) -> str:
+            sessions = state.get("sessions")
+            if not isinstance(sessions, dict):
+                sessions = {}
+            raw_slot = sessions.get(_chat_key)
+            if not isinstance(raw_slot, dict):
+                raw_slot = {}
+            wake_thread_id = str(raw_slot.get("wake_thread_id", "")).strip()
+            if not wake_thread_id:
+                wake_thread_id = new_short_id("wake")
                 raw_slot["wake_thread_id"] = wake_thread_id
-                sessions[str(chat_id)] = raw_slot
+                sessions[_chat_key] = raw_slot
                 state["sessions"] = sessions
-                state_store.save(state)
+            return wake_thread_id
+
+        wake_thread_id = state_store.update(_ensure_wake_thread_id)
         try:
             text = await agent_runtime.ainvoke_text(
                 thread_id=wake_thread_id,

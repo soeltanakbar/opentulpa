@@ -2,7 +2,7 @@
 
 Auto-generated index of instruments, skills, integration files, and artifacts.
 
-Generated: 2026-02-19T16:41:35.044399+00:00
+Generated: 2026-02-20T06:58:14.528688+00:00
 
 ## Roots
 
@@ -14,6 +14,14 @@ Generated: 2026-02-19T16:41:35.044399+00:00
 
 ## Recent Entries
 
+- `tulpa_stuff/valid_router_6e91ef9368c14b73b0ae512d7388b8d6.py` (tulpa_stuff) updated `2026-02-20T06:58:14.528688+00:00`
+- `tulpa_stuff/valid_router_f49e8b30e88044b1862a555989db61c7.py` (tulpa_stuff) updated `2026-02-20T06:57:22.000435+00:00`
+- `tulpa_stuff/valid_router_aa8d8b619efb4b6b912da80ad4408a88.py` (tulpa_stuff) updated `2026-02-20T06:54:55.171097+00:00`
+- `tulpa_stuff/valid_router_b56e6b2f9d0f498e80b6f8d05761d659.py` (tulpa_stuff) updated `2026-02-20T06:49:24.558436+00:00`
+- `tulpa_stuff/valid_router_0a94195ed49a488bac6dcb23d0f6d9a5.py` (tulpa_stuff) updated `2026-02-20T06:48:44.727400+00:00`
+- `tulpa_stuff/valid_router_c6a49d4ed26e444badf6bcaabf946724.py` (tulpa_stuff) updated `2026-02-20T06:46:00.366130+00:00`
+- `tulpa_stuff/valid_router_c17f4bdafdce49878a6279dae7923120.py` (tulpa_stuff) updated `2026-02-20T05:33:50.282006+00:00`
+- `tulpa_stuff/valid_router_0e24f779bb9b4ab8a832a09b7c79d8c6.py` (tulpa_stuff) updated `2026-02-20T05:19:02.055768+00:00`
 - `tulpa_stuff/valid_router_bac5b40f48fe4b7e9f20349aa396811c.py` (tulpa_stuff) updated `2026-02-19T16:41:35.044399+00:00`
 - `tulpa_stuff/valid_router_8aff8063e5e446768a1a99df6ec01405.py` (tulpa_stuff) updated `2026-02-19T16:40:57.574985+00:00`
 - `tulpa_stuff/valid_router_5d219705488844a584ba5b1902717f63.py` (tulpa_stuff) updated `2026-02-19T16:22:39.653392+00:00`

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -35,6 +37,148 @@ def _parse_text_token_decision(text: str) -> tuple[str, str] | None:
     if not match:
         return None
     return match.group(2), match.group(1).lower()
+
+
+async def _execute_approved_action_and_summarize(
+    *,
+    get_agent_runtime: Callable[[], Any],
+    approval_id: str,
+    decision_payload: dict[str, Any],
+    chat_id: int,
+) -> str:
+    customer_id = str(decision_payload.get("customer_id", "")).strip()
+    thread_id = str(decision_payload.get("thread_id", "")).strip() or f"chat-{chat_id}"
+    if not customer_id:
+        return "I approved this action, but couldn't resolve the customer context to execute it."
+    runtime = get_agent_runtime()
+    if runtime is None:
+        return "I approved this action, but runtime is unavailable right now."
+    if not hasattr(runtime, "execute_tool"):
+        return "I approved this action, but runtime cannot execute approved actions."
+
+    try:
+        execution_result = await runtime.execute_tool(
+            action_name="guardrail_execute_approved_action",
+            action_args={"approval_id": approval_id, "customer_id": customer_id},
+        )
+    except Exception as exc:
+        return f"I couldn't execute the approved action: {exc}"
+
+    payload_preview = json.dumps(execution_result, ensure_ascii=False)[:6000]
+    try:
+        summary = await runtime.ainvoke_text(
+            thread_id=thread_id,
+            customer_id=customer_id,
+            text=(
+                "A previously approved action has just been executed.\n"
+                f"approval_id={approval_id}\n"
+                f"execution_result={payload_preview}\n\n"
+                "Write a concise user-facing outcome message in plain text:\n"
+                "1) what was done,\n"
+                "2) whether it succeeded,\n"
+                "3) next step only if needed.\n"
+                "Do not expose internal JSON or system internals."
+            ),
+            include_pending_context=False,
+        )
+    except Exception:
+        summary = ""
+
+    final = str(summary or "").strip()
+    if final:
+        return final
+    if isinstance(execution_result, dict) and str(execution_result.get("error", "")).strip():
+        return f"I couldn't complete the approved action: {execution_result.get('error')}"
+    return "Task completed."
+
+
+async def _animate_loader_until_done(
+    *,
+    client: Any,
+    chat_id: int,
+    state: dict[str, Any],
+    stop_event: asyncio.Event,
+) -> None:
+    sequence = ("...", "..", ".", "..", "...")
+    idx = 0
+    while not stop_event.is_set():
+        marker = sequence[idx % len(sequence)]
+        idx += 1
+        state["message_id"] = (
+            await client.upsert_stream_message(
+                chat_id=chat_id,
+                text=marker,
+                message_id=state.get("message_id"),
+                parse_mode=None,
+                allow_fallback_send=False,
+            )
+            or state.get("message_id")
+        )
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop_event.wait(), timeout=0.22)
+
+
+async def _run_post_approval_execution_flow(
+    *,
+    get_telegram_client: Callable[[], Any],
+    get_agent_runtime: Callable[[], Any],
+    approval_id: str,
+    decision_payload: dict[str, Any],
+    chat_id: int,
+    approval_message_id: int | None = None,
+) -> None:
+    client = get_telegram_client()
+    with suppress(Exception):
+        if isinstance(approval_message_id, int):
+            await client.edit_message_text(
+                chat_id=chat_id,
+                message_id=approval_message_id,
+                text="Working on the task.",
+                parse_mode="HTML",
+                reply_markup={"inline_keyboard": []},
+            )
+        else:
+            await client.send_message(
+                chat_id=chat_id,
+                text="Working on the task.",
+                parse_mode="HTML",
+            )
+
+    loader_state: dict[str, Any] = {"message_id": None}
+    loader_stop = asyncio.Event()
+    loader_task = asyncio.create_task(
+        _animate_loader_until_done(
+            client=client,
+            chat_id=chat_id,
+            state=loader_state,
+            stop_event=loader_stop,
+        )
+    )
+    try:
+        outcome = await _execute_approved_action_and_summarize(
+            get_agent_runtime=get_agent_runtime,
+            approval_id=approval_id,
+            decision_payload=decision_payload,
+            chat_id=chat_id,
+        )
+    finally:
+        if not loader_stop.is_set():
+            loader_stop.set()
+        with suppress(Exception):
+            await loader_task
+
+    message_id = loader_state.get("message_id")
+    if isinstance(message_id, int):
+        with suppress(Exception):
+            await client.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=outcome,
+                parse_mode="HTML",
+            )
+        return
+    with suppress(Exception):
+        await client.send_message(chat_id=chat_id, text=outcome, parse_mode="HTML")
 
 
 def register_telegram_webhook_routes(
@@ -74,19 +218,32 @@ def register_telegram_webhook_routes(
                 decision=decision,
                 actor_interface="telegram",
                 actor_id=str(callback_user_id),
+                enqueue_wake=False,
             )
-            ack_text = (
-                f"Approval {decision}d."
-                if bool(result.get("ok"))
-                else f"Approval {decision} failed: {result.get('reason', 'not_allowed')}"
-            )
+            approved = bool(result.get("ok")) and str(result.get("status", "")).strip() == "approved"
+            denied = bool(result.get("ok")) and str(result.get("status", "")).strip() == "denied"
+            if approved:
+                ack_text = "Working on the task."
+            elif denied:
+                ack_text = "Action denied."
+            else:
+                ack_text = f"Approval {decision} failed: {result.get('reason', 'not_allowed')}"
             with suppress(Exception):
                 await get_telegram_client().answer_callback_query(
                     callback_query_id=callback_id,
                     text=ack_text,
                     show_alert=False,
                 )
-            if isinstance(callback_message_id, int):
+            if approved:
+                await _run_post_approval_execution_flow(
+                    get_telegram_client=get_telegram_client,
+                    get_agent_runtime=get_agent_runtime,
+                    approval_id=approval_id,
+                    decision_payload=result if isinstance(result, dict) else {},
+                    chat_id=callback_chat_id,
+                    approval_message_id=callback_message_id if isinstance(callback_message_id, int) else None,
+                )
+            elif isinstance(callback_message_id, int):
                 with suppress(Exception):
                     await get_telegram_client().edit_message_text(
                         chat_id=callback_chat_id,
@@ -108,18 +265,29 @@ def register_telegram_webhook_routes(
                 decision=decision,
                 actor_interface="telegram",
                 actor_id=str(user_id),
+                enqueue_wake=False,
             )
-            reply_text = (
-                f"Approval {decision}d."
-                if bool(result.get("ok"))
-                else f"Approval {decision} failed: {result.get('reason', 'not_allowed')}"
-            )
-            with suppress(Exception):
-                await get_telegram_client().send_message(
-                    chat_id=chat_id,
-                    text=reply_text,
-                    parse_mode="HTML",
+            approved = bool(result.get("ok")) and str(result.get("status", "")).strip() == "approved"
+            if approved:
+                await _run_post_approval_execution_flow(
+                    get_telegram_client=get_telegram_client,
+                    get_agent_runtime=get_agent_runtime,
+                    approval_id=approval_id,
+                    decision_payload=result if isinstance(result, dict) else {},
+                    chat_id=int(chat_id),
                 )
+            else:
+                reply_text = (
+                    "Action denied."
+                    if bool(result.get("ok")) and str(result.get("status", "")).strip() == "denied"
+                    else f"Approval {decision} failed: {result.get('reason', 'not_allowed')}"
+                )
+                with suppress(Exception):
+                    await get_telegram_client().send_message(
+                        chat_id=chat_id,
+                        text=reply_text,
+                        parse_mode="HTML",
+                    )
             return
 
         try:

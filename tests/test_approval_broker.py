@@ -141,3 +141,107 @@ async def test_classifier_failure_defaults_to_approval_required(tmp_path: Path) 
     )
     assert result["gate"] == "require_approval"
     assert result["reason"] == "guardrail_uncertain"
+
+
+@pytest.mark.asyncio
+async def test_exact_duplicate_after_executed_is_denied_without_reprompt(tmp_path: Path) -> None:
+    adapter = _CaptureAdapter()
+    broker = ApprovalBroker(
+        store=PendingApprovalStore(db_path=tmp_path / "approvals.db"),
+        runtime=_ClassifierRuntime(),
+        adapters={"telegram": adapter},
+        origin_resolver=_origin_resolver,
+    )
+    request = {
+        "customer_id": "telegram_42",
+        "thread_id": "chat-42",
+        "action_name": "slack_post",
+        "action_args": {"channel_id": "C123", "text": "hello"},
+    }
+
+    first = await broker.evaluate_action(**request)
+    approval_id = str(first.get("approval_id", "")).strip()
+    assert first["gate"] == "require_approval"
+    assert approval_id
+
+    decided = await broker.decide(
+        approval_id=approval_id,
+        decision="approve",
+        actor_interface="telegram",
+        actor_id="42",
+    )
+    assert decided["ok"] is True
+    assert decided["status"] == "approved"
+
+    async def _executor(action_name: str, action_args: dict[str, object], customer_id: str) -> dict[str, object]:
+        return {"ok": True, "action_name": action_name, "action_args": action_args, "customer_id": customer_id}
+
+    executed = await broker.execute_approved_action(
+        approval_id=approval_id,
+        customer_id="telegram_42",
+        executor=_executor,
+    )
+    assert executed["ok"] is True
+
+    again = await broker.evaluate_action(**request)
+    assert again["gate"] == "deny"
+    assert again["reason"] == "already_executed_recent_duplicate"
+    assert again.get("approval_id") is None
+    assert len(adapter.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_browser_task_duplicate_summary_after_executed_is_denied(tmp_path: Path) -> None:
+    adapter = _CaptureAdapter()
+    broker = ApprovalBroker(
+        store=PendingApprovalStore(db_path=tmp_path / "approvals.db"),
+        runtime=_ClassifierRuntime(),
+        adapters={"telegram": adapter},
+        origin_resolver=_origin_resolver,
+    )
+    first = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="chat-42",
+        action_name="browser_use_run",
+        action_args={
+            "task": "Go to agentmail.to and submit registration",
+            "max_steps": 18,
+            "sessionId": "sess_a",
+        },
+    )
+    approval_id = str(first.get("approval_id", "")).strip()
+    assert first["gate"] == "require_approval"
+    assert approval_id
+
+    decided = await broker.decide(
+        approval_id=approval_id,
+        decision="approve",
+        actor_interface="telegram",
+        actor_id="42",
+    )
+    assert decided["ok"] is True
+
+    async def _executor(action_name: str, action_args: dict[str, object], customer_id: str) -> dict[str, object]:
+        return {"ok": True}
+
+    executed = await broker.execute_approved_action(
+        approval_id=approval_id,
+        customer_id="telegram_42",
+        executor=_executor,
+    )
+    assert executed["ok"] is True
+
+    # Same task text, drifted transient args: should not reprompt immediately.
+    again = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="chat-42",
+        action_name="browser_use_run",
+        action_args={
+            "task": "Go to agentmail.to and submit registration",
+            "max_steps": 25,
+            "sessionId": "sess_b",
+        },
+    )
+    assert again["gate"] == "deny"
+    assert again["reason"] == "already_executed_recent_browser_task"
+    assert again.get("approval_id") is None

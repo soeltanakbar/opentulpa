@@ -1,5 +1,7 @@
 """FastAPI application: health, internal API, Telegram webhook, and agent runtime."""
 
+from __future__ import annotations
+
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -41,9 +43,7 @@ from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.memory.service import MemoryService
 from opentulpa.scheduler.service import SchedulerService
 from opentulpa.skills.service import SkillStoreService
-from opentulpa.tasks.sandbox import (
-    PROJECT_ROOT,
-)
+from opentulpa.tasks.sandbox import PROJECT_ROOT
 from opentulpa.tasks.sandbox import delete_file as sandbox_delete_file
 from opentulpa.tasks.service import TaskService
 from opentulpa.tasks.wake_queue import WakeQueueService
@@ -55,101 +55,11 @@ _download_image_from_web_url = download_image_from_web_url
 _infer_image_filename = infer_image_filename
 _safe_telegram_filename = safe_telegram_filename
 
-# Global refs for internal routes (injected by create_app)
-_memory: MemoryService | None = None
-_scheduler: SchedulerService | None = None
-_slack: Any | None = None  # SlackClient from integrations.slack_client
-_tasks: TaskService | None = None
-_wake_queue: WakeQueueService | None = None
-_tulpa_loader: TulpaRouterLoader | None = None
-_agent_runtime: Any | None = None
-_context_events: EventContextService | None = None
-_profiles: CustomerProfileService | None = None
-_file_vault: FileVaultService | None = None
-_skill_store: SkillStoreService | None = None
-_telegram_chat: TelegramChatService | None = None
-_telegram_client: TelegramClient | None = None
-_approval_store: PendingApprovalStore | None = None
-_approvals: ApprovalBroker | None = None
-_tulpa_router = APIRouter()
 
-
-def _get_memory() -> MemoryService:
-    if _memory is None:
-        raise RuntimeError("MemoryService not initialized")
-    return _memory
-
-
-def _get_scheduler() -> SchedulerService:
-    if _scheduler is None:
-        raise RuntimeError("SchedulerService not initialized")
-    return _scheduler
-
-
-def _get_slack() -> Any:
-    if _slack is None:
-        raise RuntimeError("Slack not initialized (no SLACK_BOT_TOKEN)")
-    return _slack
-
-
-def _get_tulpa_loader() -> TulpaRouterLoader:
-    if _tulpa_loader is None:
-        raise RuntimeError("Tulpa loader not initialized")
-    return _tulpa_loader
-
-
-def _get_tasks() -> TaskService:
-    if _tasks is None:
-        raise RuntimeError("TaskService not initialized")
-    return _tasks
-
-
-def _get_wake_queue() -> WakeQueueService:
-    if _wake_queue is None:
-        raise RuntimeError("WakeQueueService not initialized")
-    return _wake_queue
-
-
-def _get_context_events() -> EventContextService:
-    if _context_events is None:
-        raise RuntimeError("EventContextService not initialized")
-    return _context_events
-
-
-def _get_profiles() -> CustomerProfileService:
-    if _profiles is None:
-        raise RuntimeError("CustomerProfileService not initialized")
-    return _profiles
-
-
-def _get_file_vault() -> FileVaultService:
-    if _file_vault is None:
-        raise RuntimeError("FileVaultService not initialized")
-    return _file_vault
-
-
-def _get_skill_store() -> SkillStoreService:
-    if _skill_store is None:
-        raise RuntimeError("SkillStoreService not initialized")
-    return _skill_store
-
-
-def _get_telegram_chat() -> TelegramChatService:
-    if _telegram_chat is None:
-        raise RuntimeError("TelegramChatService not initialized")
-    return _telegram_chat
-
-
-def _get_telegram_client() -> TelegramClient:
-    if _telegram_client is None:
-        raise RuntimeError("TelegramClient not initialized")
-    return _telegram_client
-
-
-def _get_approvals() -> ApprovalBroker:
-    if _approvals is None:
-        raise RuntimeError("ApprovalBroker not initialized")
-    return _approvals
+def _require(value: Any, name: str) -> Any:
+    if value is None:
+        raise RuntimeError(f"{name} not initialized")
+    return value
 
 
 def create_app(
@@ -164,46 +74,78 @@ def create_app(
     skill_store_service: SkillStoreService | None = None,
 ) -> FastAPI:
     """Create FastAPI app with internal API, webhook, and agent runtime."""
-    global _memory, _scheduler, _slack, _tulpa_loader, _tasks, _wake_queue, _agent_runtime, _context_events, _profiles, _file_vault, _skill_store, _telegram_chat, _telegram_client, _approval_store, _approvals
-    _memory = memory
-    _scheduler = scheduler
-    _slack = slack_client
-    _tasks = task_service
-    _agent_runtime = agent_runtime
-    _context_events = context_events or EventContextService(
+    memory_service = memory
+    scheduler_service = scheduler
+    slack_service = slack_client
+    task_runner = task_service
+    runtime = agent_runtime
+    context_events_service = context_events or EventContextService(
         db_path=PROJECT_ROOT / ".opentulpa" / "context_events.db"
     )
-    _profiles = customer_profile_service or CustomerProfileService(
+    profile_service = customer_profile_service or CustomerProfileService(
         db_path=PROJECT_ROOT / ".opentulpa" / "customer_profiles.db"
     )
-    _file_vault = file_vault_service or FileVaultService(
+    vault_service = file_vault_service or FileVaultService(
         root_dir=PROJECT_ROOT / ".opentulpa" / "file_vault",
         db_path=PROJECT_ROOT / ".opentulpa" / "file_vault.db",
     )
-    _skill_store = skill_store_service or SkillStoreService(
+    skill_service = skill_store_service or SkillStoreService(
         db_path=PROJECT_ROOT / ".opentulpa" / "skills.db",
         root_dir=PROJECT_ROOT / ".opentulpa" / "skills",
     )
-    _skill_store.ensure_default_skill()
+    skill_service.ensure_default_skill()
 
     settings = get_settings()
-    _telegram_client = (
+    telegram_client = (
         TelegramClient(settings.telegram_bot_token) if settings.telegram_bot_token else None
     )
-    _telegram_chat = (
+    telegram_chat = (
         TelegramChatService(
             bot_token=settings.telegram_bot_token,
-            file_vault=_file_vault,
-            memory=_memory,
+            file_vault=vault_service,
+            memory=memory_service,
         )
         if settings.telegram_bot_token
         else None
     )
 
-    def _resolve_approval_origin(customer_id: str, thread_id: str) -> dict[str, Any]:
-        if _telegram_chat is None:
+    def get_memory() -> MemoryService:
+        return _require(memory_service, "MemoryService")
+
+    def get_scheduler() -> SchedulerService:
+        return _require(scheduler_service, "SchedulerService")
+
+    def get_slack() -> Any:
+        return _require(slack_service, "Slack")
+
+    def get_tasks() -> TaskService:
+        return _require(task_runner, "TaskService")
+
+    def get_context_events() -> EventContextService:
+        return _require(context_events_service, "EventContextService")
+
+    def get_profiles() -> CustomerProfileService:
+        return _require(profile_service, "CustomerProfileService")
+
+    def get_file_vault() -> FileVaultService:
+        return _require(vault_service, "FileVaultService")
+
+    def get_skill_store() -> SkillStoreService:
+        return _require(skill_service, "SkillStoreService")
+
+    def get_telegram_chat() -> TelegramChatService:
+        return _require(telegram_chat, "TelegramChatService")
+
+    def get_telegram_client() -> TelegramClient:
+        return _require(telegram_client, "TelegramClient")
+
+    def get_agent_runtime() -> Any:
+        return runtime
+
+    def resolve_approval_origin(customer_id: str, thread_id: str) -> dict[str, Any]:
+        if telegram_chat is None:
             return {}
-        slots = _telegram_chat.find_session_slots(customer_id)
+        slots = telegram_chat.find_session_slots(customer_id)
         if not slots:
             return {}
         selected = None
@@ -230,21 +172,32 @@ def create_app(
     approval_db = Path(settings.approvals_db_path)
     if not approval_db.is_absolute():
         approval_db = (PROJECT_ROOT / approval_db).resolve()
-    _approval_store = PendingApprovalStore(db_path=approval_db)
-    telegram_adapter = (
-        TelegramApprovalAdapter(client=_telegram_client) if _telegram_client is not None else None
-    )
-    text_token_adapter = TextTokenApprovalAdapter(telegram_client=_telegram_client)
-    _approvals = ApprovalBroker(
-        store=_approval_store,
-        runtime=_agent_runtime,
+    approval_store = PendingApprovalStore(db_path=approval_db)
+    telegram_adapter = TelegramApprovalAdapter(client=telegram_client) if telegram_client else None
+    text_token_adapter = TextTokenApprovalAdapter(telegram_client=telegram_client)
+    approvals = ApprovalBroker(
+        store=approval_store,
+        runtime=runtime,
         approval_ttl_minutes=settings.approvals_ttl_minutes,
         adapters={"telegram": telegram_adapter} if telegram_adapter is not None else {},
         text_token_adapter=text_token_adapter,
-        origin_resolver=_resolve_approval_origin,
+        origin_resolver=resolve_approval_origin,
     )
 
-    async def _process_wake_event(body: dict[str, Any]) -> None:
+    def get_approvals() -> ApprovalBroker:
+        return approvals
+
+    wake_queue_service: WakeQueueService | None = None
+    tulpa_loader: TulpaRouterLoader | None = None
+    tulpa_router = APIRouter()
+
+    def get_wake_queue() -> WakeQueueService:
+        return _require(wake_queue_service, "WakeQueueService")
+
+    def get_tulpa_loader() -> TulpaRouterLoader:
+        return _require(tulpa_loader, "TulpaRouterLoader")
+
+    async def process_wake_event(body: dict[str, Any]) -> None:
         logger.info("Processing wake event: %s", body)
         wake_type = str(body.get("type", "")).strip()
         if wake_type not in {"task_event", "routine_event", "approval_event"}:
@@ -260,8 +213,8 @@ def create_app(
                 "event_type": event_type,
                 "payload": payload,
             }
-            if not settings.telegram_bot_token or _agent_runtime is None:
-                _get_context_events().add_event(
+            if not settings.telegram_bot_token or runtime is None:
+                get_context_events().add_event(
                     customer_id=customer_id,
                     source="approval",
                     event_type=event_type,
@@ -269,14 +222,14 @@ def create_app(
                 )
                 return
             try:
-                replies = await _get_telegram_chat().relay_event(
+                replies = await get_telegram_chat().relay_event(
                     customer_id=customer_id,
                     event_label=f"approval/{event_type}",
                     payload=queue_payload,
-                    agent_runtime=_agent_runtime,
+                    agent_runtime=runtime,
                 )
             except Exception:
-                _get_context_events().add_event(
+                get_context_events().add_event(
                     customer_id=customer_id,
                     source="approval",
                     event_type=event_type,
@@ -284,7 +237,7 @@ def create_app(
                 )
                 return
             if not replies:
-                _get_context_events().add_event(
+                get_context_events().add_event(
                     customer_id=customer_id,
                     source="approval",
                     event_type=event_type,
@@ -292,12 +245,13 @@ def create_app(
                 )
                 return
             for item in replies:
-                await _get_telegram_client().send_message(
+                await get_telegram_client().send_message(
                     chat_id=item["chat_id"],
                     text=item["text"],
                     parse_mode="HTML",
                 )
             return
+
         if wake_type == "task_event":
             customer_id = str(body.get("customer_id", "")).strip()
             event_type = str(body.get("event_type", "")).strip()
@@ -306,8 +260,8 @@ def create_app(
                 return
 
             should_notify = event_type == "needs_input"
-            if not should_notify and _agent_runtime and hasattr(_agent_runtime, "classify_wake_event"):
-                decision = await _agent_runtime.classify_wake_event(
+            if not should_notify and runtime and hasattr(runtime, "classify_wake_event"):
+                decision = await runtime.classify_wake_event(
                     customer_id=customer_id,
                     event_label=f"task/{event_type}",
                     payload={
@@ -318,61 +272,47 @@ def create_app(
                 should_notify = bool(decision.get("notify_user", False))
 
             if not should_notify:
-                _get_context_events().add_event(
+                get_context_events().add_event(
                     customer_id=customer_id,
                     source="task",
                     event_type=event_type,
-                    payload={
-                        "task_id": str(body.get("task_id", "")),
-                        **payload,
-                    },
+                    payload={"task_id": str(body.get("task_id", "")), **payload},
                 )
                 return
-
             if not settings.telegram_bot_token:
-                _get_context_events().add_event(
+                get_context_events().add_event(
                     customer_id=customer_id,
                     source="task",
                     event_type=event_type,
-                    payload={
-                        "task_id": str(body.get("task_id", "")),
-                        **payload,
-                    },
+                    payload={"task_id": str(body.get("task_id", "")), **payload},
                 )
                 return
-
             try:
-                replies = await _get_telegram_chat().relay_task_event(
+                replies = await get_telegram_chat().relay_task_event(
                     customer_id=customer_id,
                     task_id=str(body.get("task_id", "")),
                     event_type=event_type,
                     payload=payload,
-                    agent_runtime=_agent_runtime,
+                    agent_runtime=runtime,
                 )
             except Exception:
-                _get_context_events().add_event(
+                get_context_events().add_event(
                     customer_id=customer_id,
                     source="task",
                     event_type=event_type,
-                    payload={
-                        "task_id": str(body.get("task_id", "")),
-                        **payload,
-                    },
+                    payload={"task_id": str(body.get("task_id", "")), **payload},
                 )
                 return
             if not replies:
-                _get_context_events().add_event(
+                get_context_events().add_event(
                     customer_id=customer_id,
                     source="task",
                     event_type=event_type,
-                    payload={
-                        "task_id": str(body.get("task_id", "")),
-                        **payload,
-                    },
+                    payload={"task_id": str(body.get("task_id", "")), **payload},
                 )
                 return
             for item in replies:
-                await _get_telegram_client().send_message(
+                await get_telegram_client().send_message(
                     chat_id=item["chat_id"],
                     text=item["text"],
                     parse_mode="HTML",
@@ -397,34 +337,31 @@ def create_app(
             "notify_user": bool(notify_user),
             "payload": payload,
         }
-
         if not notify_user:
-            _get_context_events().add_event(
+            get_context_events().add_event(
                 customer_id=customer_id,
                 source="routine",
                 event_type=event_type,
                 payload=queue_payload,
             )
             return
-
-        if not settings.telegram_bot_token or _agent_runtime is None:
-            _get_context_events().add_event(
+        if not settings.telegram_bot_token or runtime is None:
+            get_context_events().add_event(
                 customer_id=customer_id,
                 source="routine",
                 event_type=event_type,
                 payload=queue_payload,
             )
             return
-
         try:
-            replies = await _get_telegram_chat().relay_event(
+            replies = await get_telegram_chat().relay_event(
                 customer_id=customer_id,
                 event_label=f"routine/{event_type}",
                 payload=queue_payload,
-                agent_runtime=_agent_runtime,
+                agent_runtime=runtime,
             )
         except Exception:
-            _get_context_events().add_event(
+            get_context_events().add_event(
                 customer_id=customer_id,
                 source="routine",
                 event_type=event_type,
@@ -432,7 +369,7 @@ def create_app(
             )
             return
         if not replies:
-            _get_context_events().add_event(
+            get_context_events().add_event(
                 customer_id=customer_id,
                 source="routine",
                 event_type=event_type,
@@ -440,40 +377,40 @@ def create_app(
             )
             return
         for item in replies:
-            await _get_telegram_client().send_message(
+            await get_telegram_client().send_message(
                 chat_id=item["chat_id"],
                 text=item["text"],
                 parse_mode="HTML",
             )
 
-    _wake_queue = WakeQueueService(
+    wake_queue_service = WakeQueueService(
         db_path=PROJECT_ROOT / ".opentulpa" / "wake_events.db",
-        handler=_process_wake_event,
+        handler=process_wake_event,
     )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Ensure tulpa router discovery runs at startup.
-        result = _get_tulpa_loader().reload()
+        loader = get_tulpa_loader()
+        result = loader.reload()
         if result.get("errors"):
             logger.warning("Tulpa router load had errors: %s", result["errors"])
-        if _agent_runtime and hasattr(_agent_runtime, "start"):
-            await _agent_runtime.start()
-        if _scheduler:
-            _scheduler.start()
-        if _tasks:
-            await _tasks.start()
-        if _wake_queue:
-            await _wake_queue.start()
+        if runtime and hasattr(runtime, "start"):
+            await runtime.start()
+        if scheduler_service:
+            scheduler_service.start()
+        if task_runner:
+            await task_runner.start()
+        if wake_queue_service:
+            await wake_queue_service.start()
         yield
-        if _scheduler:
-            _scheduler.shutdown(wait=True)
-        if _tasks:
-            await _tasks.shutdown()
-        if _wake_queue:
-            await _wake_queue.shutdown()
-        if _agent_runtime and hasattr(_agent_runtime, "shutdown"):
-            await _agent_runtime.shutdown()
+        if scheduler_service:
+            scheduler_service.shutdown(wait=True)
+        if task_runner:
+            await task_runner.shutdown()
+        if wake_queue_service:
+            await wake_queue_service.shutdown()
+        if runtime and hasattr(runtime, "shutdown"):
+            await runtime.shutdown()
 
     app = FastAPI(
         title="OpenTulpa",
@@ -481,53 +418,53 @@ def create_app(
         version="0.1.0",
         lifespan=lifespan,
     )
-    _tulpa_loader = TulpaRouterLoader(project_root=PROJECT_ROOT, mount_router=_tulpa_router)
-    app.include_router(_tulpa_router, prefix="/tulpa")
-    register_health_routes(app, get_agent_runtime=lambda: _agent_runtime)
-    register_memory_routes(app, get_memory=_get_memory)
+    tulpa_loader = TulpaRouterLoader(project_root=PROJECT_ROOT, mount_router=tulpa_router)
+    app.include_router(tulpa_router, prefix="/tulpa")
+
+    register_health_routes(app, get_agent_runtime=get_agent_runtime)
+    register_memory_routes(app, get_memory=get_memory)
     register_file_routes(
         app,
-        get_file_vault=_get_file_vault,
-        get_telegram_chat=_get_telegram_chat,
-        get_telegram_client=_get_telegram_client,
-        get_agent_runtime=lambda: _agent_runtime,
+        get_file_vault=get_file_vault,
+        get_telegram_chat=get_telegram_chat,
+        get_telegram_client=get_telegram_client,
+        get_agent_runtime=get_agent_runtime,
         telegram_enabled=bool(settings.telegram_bot_token),
     )
     register_profile_routes(
         app,
-        get_profiles=_get_profiles,
-        get_memory=lambda: _memory,
+        get_profiles=get_profiles,
+        get_memory=lambda: memory_service,
     )
     register_skill_routes(
         app,
-        get_skill_store=_get_skill_store,
-        get_memory=lambda: _memory,
+        get_skill_store=get_skill_store,
+        get_memory=lambda: memory_service,
     )
 
-    _decide_approval_and_maybe_wake = register_approval_routes(
+    decide_approval_and_maybe_wake = register_approval_routes(
         app,
-        get_approvals=_get_approvals,
-        get_wake_queue=_get_wake_queue,
-        get_agent_runtime=lambda: _agent_runtime,
+        get_approvals=get_approvals,
+        get_wake_queue=get_wake_queue,
+        get_agent_runtime=get_agent_runtime,
     )
-
     register_scheduler_routes(
         app,
-        get_scheduler=_get_scheduler,
+        get_scheduler=get_scheduler,
         delete_file=sandbox_delete_file,
     )
     register_wake_and_search_routes(
         app,
-        get_wake_queue=_get_wake_queue,
+        get_wake_queue=get_wake_queue,
         llm_model=settings.llm_model,
     )
-    register_tulpa_routes(app, get_tulpa_loader=_get_tulpa_loader)
-    register_task_routes(app, get_tasks=_get_tasks)
+    register_tulpa_routes(app, get_tulpa_loader=get_tulpa_loader)
+    register_task_routes(app, get_tasks=get_tasks)
 
-    if _slack is not None:
+    if slack_service is not None:
         register_slack_routes(
             app,
-            get_slack=_get_slack,
+            get_slack=get_slack,
             has_write_consent=has_slack_write_consent,
             grant_write_consent=grant_slack_write_consent,
         )
@@ -535,10 +472,10 @@ def create_app(
     register_telegram_webhook_routes(
         app,
         settings=settings,
-        get_telegram_client=_get_telegram_client,
-        get_telegram_chat=_get_telegram_chat,
-        get_agent_runtime=lambda: _agent_runtime,
-        decide_approval_and_maybe_wake=_decide_approval_and_maybe_wake,
+        get_telegram_client=get_telegram_client,
+        get_telegram_chat=get_telegram_chat,
+        get_agent_runtime=get_agent_runtime,
+        decide_approval_and_maybe_wake=decide_approval_and_maybe_wake,
     )
 
     return app

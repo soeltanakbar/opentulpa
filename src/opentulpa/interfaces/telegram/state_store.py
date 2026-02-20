@@ -5,18 +5,20 @@ from __future__ import annotations
 import json
 from contextlib import suppress
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 
 class TelegramStateStore:
     def __init__(self, state_path: Path) -> None:
         self.state_path = state_path.resolve()
+        self._lock = RLock()
 
     @staticmethod
     def _default_state() -> dict[str, Any]:
         return {"admin_user_id": None, "sessions": {}, "pending_key_by_chat": {}}
 
-    def load(self) -> dict[str, Any]:
+    def _load_unlocked(self) -> dict[str, Any]:
         if not self.state_path.exists():
             return self._default_state()
         try:
@@ -24,11 +26,30 @@ class TelegramStateStore:
         except Exception:
             return self._default_state()
 
-    def save(self, state: dict[str, Any]) -> None:
+    def _save_unlocked(self, state: dict[str, Any]) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
         with suppress(Exception):
             self.state_path.chmod(0o600)
+
+    def load(self) -> dict[str, Any]:
+        with self._lock:
+            return self._load_unlocked()
+
+    def save(self, state: dict[str, Any]) -> None:
+        with self._lock:
+            self._save_unlocked(state)
+
+    def update(self, mutator: Any) -> Any:
+        """
+        Atomically load-modify-save state in one lock scope.
+        `mutator` receives mutable state dict and can return any value.
+        """
+        with self._lock:
+            state = self._load_unlocked()
+            result = mutator(state)
+            self._save_unlocked(state)
+            return result
 
     def find_session_slots(self, customer_id: str) -> list[dict[str, Any]]:
         state = self.load()

@@ -95,7 +95,7 @@ def _start_help_text() -> str:
         "To personalize quickly, answer these:\n"
         "1. What are you struggling with right now?\n"
         "2. Which repetitive task should I automate first?\n"
-        "3. Which services should I connect first (Slack, Gmail, Sheets, etc.)?\n\n"
+        "3. Which services should I connect first (Gmail, Sheets, custom APIs, etc.)?\n\n"
         "Commands:\n"
         "/status\n"
         "/setup\n"
@@ -178,15 +178,23 @@ async def handle_telegram_text(
     ):
         return "This bot is restricted and your Telegram account is not allowed."
 
-    state = STATE_STORE.load()
-    admin_user_id = state.get("admin_user_id")
-    if admin_user_id is None:
-        state["admin_user_id"] = ctx.user_id
-        admin_user_id = ctx.user_id
-        STATE_STORE.save(state)
+    def _ensure_admin_and_read_pending(state: dict[str, Any]) -> tuple[Any, str | None]:
+        admin_user_id = state.get("admin_user_id")
+        if admin_user_id is None:
+            admin_user_id = ctx.user_id
+            state["admin_user_id"] = admin_user_id
+        pending_map = state.get("pending_key_by_chat")
+        if not isinstance(pending_map, dict):
+            pending_map = {}
+            state["pending_key_by_chat"] = pending_map
+        pending_key = pending_map.get(str(ctx.chat_id))
+        if pending_key is None:
+            return admin_user_id, None
+        pending_key_text = str(pending_key).strip()
+        return admin_user_id, (pending_key_text or None)
+
+    admin_user_id, pending_key = STATE_STORE.update(_ensure_admin_and_read_pending)
     is_admin = int(admin_user_id) == int(ctx.user_id)
-    pending = state.get("pending_key_by_chat", {})
-    pending_key = pending.get(str(ctx.chat_id))
 
     text_lower = ctx.text.lower()
     if text_lower in {"/start", "/help"}:
@@ -195,18 +203,28 @@ async def handle_telegram_text(
         agent_up = bool(agent_runtime and getattr(agent_runtime, "healthy", lambda: False)())
         return status_text(agent_up)
     if text_lower == "/cancel":
-        pending.pop(str(ctx.chat_id), None)
-        state["pending_key_by_chat"] = pending
-        STATE_STORE.save(state)
+        def _clear_pending(state: dict[str, Any]) -> None:
+            pending_map = state.get("pending_key_by_chat")
+            if not isinstance(pending_map, dict):
+                pending_map = {}
+            pending_map.pop(str(ctx.chat_id), None)
+            state["pending_key_by_chat"] = pending_map
+
+        STATE_STORE.update(_clear_pending)
         return "Cancelled pending setup."
 
     if text_lower == "/setup":
         if not is_admin:
             return "Only the bot admin can set keys."
         if not os.environ.get("OPENROUTER_API_KEY"):
-            pending[str(ctx.chat_id)] = "OPENROUTER_API_KEY"
-            state["pending_key_by_chat"] = pending
-            STATE_STORE.save(state)
+            def _set_pending_openrouter(state: dict[str, Any]) -> None:
+                pending_map = state.get("pending_key_by_chat")
+                if not isinstance(pending_map, dict):
+                    pending_map = {}
+                pending_map[str(ctx.chat_id)] = "OPENROUTER_API_KEY"
+                state["pending_key_by_chat"] = pending_map
+
+            STATE_STORE.update(_set_pending_openrouter)
             return "Please send your OPENROUTER_API_KEY value now."
         return "Core key is already set. Use /set KEY VALUE for additional keys."
 
@@ -220,9 +238,15 @@ async def handle_telegram_text(
             upsert_env_key(pending_key, value)
         except Exception as exc:
             return f"Failed to save {pending_key}: {exc}"
-        pending.pop(str(ctx.chat_id), None)
-        state["pending_key_by_chat"] = pending
-        STATE_STORE.save(state)
+
+        def _clear_pending_after_save(state: dict[str, Any]) -> None:
+            pending_map = state.get("pending_key_by_chat")
+            if not isinstance(pending_map, dict):
+                pending_map = {}
+            pending_map.pop(str(ctx.chat_id), None)
+            state["pending_key_by_chat"] = pending_map
+
+        STATE_STORE.update(_clear_pending_after_save)
         return f"Saved {pending_key}={mask_secret(value)}.\nRestart OpenTulpa to apply."
 
     kv = extract_set_command(ctx.text) or extract_inline_key_value(ctx.text)
@@ -241,18 +265,25 @@ async def handle_telegram_text(
     if agent_runtime is None:
         return "Agent runtime is unavailable. Restart OpenTulpa and try again."
 
-    sessions = state.get("sessions", {})
-    slot = sessions.get(str(ctx.chat_id), {})
-    thread_id = str(slot.get("thread_id", "")).strip() or f"chat-{ctx.chat_id}"
-    customer_id = str(slot.get("customer_id", "")).strip() or f"telegram_{ctx.user_id}"
-    sessions[str(ctx.chat_id)] = {
-        "user_id": ctx.user_id,
-        "customer_id": customer_id,
-        "thread_id": thread_id,
-        "wake_thread_id": slot.get("wake_thread_id"),
-    }
-    state["sessions"] = sessions
-    STATE_STORE.save(state)
+    def _upsert_session(state: dict[str, Any]) -> tuple[str, str]:
+        sessions = state.get("sessions")
+        if not isinstance(sessions, dict):
+            sessions = {}
+        slot = sessions.get(str(ctx.chat_id))
+        if not isinstance(slot, dict):
+            slot = {}
+        thread_id = str(slot.get("thread_id", "")).strip() or f"chat-{ctx.chat_id}"
+        customer_id = str(slot.get("customer_id", "")).strip() or f"telegram_{ctx.user_id}"
+        sessions[str(ctx.chat_id)] = {
+            "user_id": ctx.user_id,
+            "customer_id": customer_id,
+            "thread_id": thread_id,
+            "wake_thread_id": slot.get("wake_thread_id"),
+        }
+        state["sessions"] = sessions
+        return thread_id, customer_id
+
+    thread_id, customer_id = STATE_STORE.update(_upsert_session)
 
     ingested_files: list[dict[str, Any]] = []
     if attachments and bot_token and file_vault is not None:
@@ -305,7 +336,7 @@ async def handle_telegram_text(
 
     if bot_token:
         try:
-            final = await stream_langgraph_reply_to_telegram(
+            final, suppressed = await stream_langgraph_reply_to_telegram(
                 agent_runtime=agent_runtime,
                 thread_id=thread_id,
                 customer_id=customer_id,
@@ -313,6 +344,8 @@ async def handle_telegram_text(
                 bot_token=bot_token,
                 chat_id=ctx.chat_id,
             )
+            if suppressed:
+                return None
         except Exception as exc:
             logger.exception(
                 "Telegram streaming reply failed (chat_id=%s, thread_id=%s): %s",

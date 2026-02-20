@@ -53,7 +53,12 @@ from opentulpa.agent.file_analysis import (
     transcribe_audio_blob as _transcribe_audio_blob,
 )
 from opentulpa.agent.graph_builder import build_runtime_graph
+from opentulpa.agent.internal_api_client import InternalApiClient
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage
+from opentulpa.agent.runtime_input import (
+    MergedInputSuppressedError,
+    ThreadInputCoordinator,
+)
 from opentulpa.agent.tools_registry import register_runtime_tools
 from opentulpa.agent.utils import (
     content_to_text as _content_to_text,
@@ -71,6 +76,30 @@ from opentulpa.context.customer_profiles import CustomerProfileService
 from opentulpa.context.service import EventContextService
 from opentulpa.context.thread_rollups import ThreadRollupService
 
+APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS: set[str] = {
+    "memory_search",
+    "memory_add",
+    "uploaded_file_search",
+    "uploaded_file_get",
+    "uploaded_file_send",
+    "web_image_send",
+    "uploaded_file_analyze",
+    "skill_list",
+    "skill_get",
+    "skill_upsert",
+    "skill_delete",
+    "directive_get",
+    "directive_set",
+    "directive_clear",
+    "time_profile_get",
+    "time_profile_set",
+    "routine_list",
+    "routine_create",
+    "routine_delete",
+    "automation_delete",
+    "browser_use_run",
+}
+
 
 class OpenTulpaLangGraphRuntime:
     def __init__(
@@ -86,6 +115,7 @@ class OpenTulpaLangGraphRuntime:
         thread_rollup_service: ThreadRollupService | None = None,
         context_token_limit: int = 250000,
         context_rollup_tokens: int = 100000,
+        input_debounce_seconds: float = 0.65,
     ) -> None:
         self.app_url = app_url.rstrip("/")
         self.openrouter_api_key = openrouter_api_key
@@ -97,6 +127,7 @@ class OpenTulpaLangGraphRuntime:
         self._thread_rollup_service = thread_rollup_service
         self._context_token_limit = max(50000, int(context_token_limit))
         self._context_rollup_tokens = max(10000, int(context_rollup_tokens))
+        self._input_debounce_seconds = max(0.0, min(float(input_debounce_seconds), 3.0))
 
         self._model = init_chat_model(
             self.model_name,
@@ -111,6 +142,8 @@ class OpenTulpaLangGraphRuntime:
         self._graph = None
         self._tools: dict[str, Any] = {}
         self._model_with_tools = None
+        self._thread_inputs = ThreadInputCoordinator(debounce_seconds=self._input_debounce_seconds)
+        self._internal_api = InternalApiClient(base_url=self.app_url)
 
     @staticmethod
     def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -665,37 +698,62 @@ class OpenTulpaLangGraphRuntime:
     ) -> str:
         await self.start()
         assert self._graph is not None
-        await self._maybe_compact_thread_context(thread_id=thread_id, customer_id=customer_id)
-        merged_text, through_id = self._prepend_pending_context(
-            customer_id=customer_id,
-            text=text,
-            include_pending_context=include_pending_context,
+        turn_state, effective_text = await self._thread_inputs.begin_turn(
+            thread_id=thread_id, text=text
         )
-        skill_state = await self._pre_resolve_skill_state(
-            customer_id=customer_id,
-            user_text=merged_text,
-        )
-        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": self.recursion_limit}
-        result = await self._graph.ainvoke(
-            {
-                "messages": [HumanMessage(content=merged_text)],
-                "customer_id": customer_id,
-                "thread_id": thread_id,
-                "tool_error_count": 0,
-                **skill_state,
-            },
-            config=config,
-        )
-        messages = result.get("messages", [])
-        for message in reversed(messages):
-            if isinstance(message, AIMessage) and (message.content or "").strip():
-                cleaned = self._strip_internal_json_prefix(str(message.content))
-                if self._has_incomplete_internal_json_prefix(cleaned):
-                    continue
-                if through_id is not None and self._context_events is not None:
-                    self._context_events.clear_events(customer_id, through_id=through_id)
-                return cleaned.strip()
-        return "I ran into an issue and could not produce a final response yet."
+        if turn_state is None:
+            return ""
+        try:
+            await self._maybe_compact_thread_context(thread_id=thread_id, customer_id=customer_id)
+            merged_text, through_id = self._prepend_pending_context(
+                customer_id=customer_id,
+                text=effective_text,
+                include_pending_context=include_pending_context,
+            )
+            skill_state = await self._pre_resolve_skill_state(
+                customer_id=customer_id,
+                user_text=merged_text,
+            )
+            config = {"configurable": {"thread_id": thread_id}, "recursion_limit": self.recursion_limit}
+            result = await self._graph.ainvoke(
+                {
+                    "messages": [HumanMessage(content=merged_text)],
+                    "customer_id": customer_id,
+                    "thread_id": thread_id,
+                    "tool_error_count": 0,
+                    **skill_state,
+                },
+                config=config,
+            )
+            messages = result.get("messages", [])
+            for message in reversed(messages):
+                if isinstance(message, AIMessage) and (message.content or "").strip():
+                    cleaned = self._strip_internal_json_prefix(str(message.content))
+                    if self._has_incomplete_internal_json_prefix(cleaned):
+                        continue
+                    if through_id is not None and self._context_events is not None:
+                        self._context_events.clear_events(customer_id, through_id=through_id)
+                    return cleaned.strip()
+            return "I ran into an issue and could not produce a final response yet."
+        finally:
+            self._thread_inputs.end_turn(turn_state)
+
+    async def _begin_thread_turn(
+        self,
+        *,
+        thread_id: str,
+        text: str,
+    ) -> tuple[Any | None, str]:
+        """
+        Backward-compatible wrapper for tests/internal callers that relied on
+        the previous runtime-local turn debounce API.
+        """
+        return await self._thread_inputs.begin_turn(thread_id=thread_id, text=text)
+
+    @staticmethod
+    def _end_thread_turn(state: Any | None) -> None:
+        """Backward-compatible wrapper around thread turn release."""
+        ThreadInputCoordinator.end_turn(state)
 
     async def astream_text(
         self,
@@ -707,53 +765,73 @@ class OpenTulpaLangGraphRuntime:
     ) -> AsyncIterator[str]:
         await self.start()
         assert self._graph is not None
-        await self._maybe_compact_thread_context(thread_id=thread_id, customer_id=customer_id)
-        merged_text, through_id = self._prepend_pending_context(
-            customer_id=customer_id,
-            text=text,
-            include_pending_context=include_pending_context,
+        turn_state, effective_text = await self._thread_inputs.begin_turn(
+            thread_id=thread_id, text=text
         )
-        skill_state = await self._pre_resolve_skill_state(
-            customer_id=customer_id,
-            user_text=merged_text,
-        )
-        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": self.recursion_limit}
-        accumulated = ""
-        yielded_any = False
-        async for message_chunk, metadata in self._graph.astream(
-            {
-                "messages": [HumanMessage(content=merged_text)],
-                "customer_id": customer_id,
-                "thread_id": thread_id,
-                "tool_error_count": 0,
-                **skill_state,
-            },
-            config=config,
-            stream_mode="messages",
-        ):
-            if metadata.get("langgraph_node") != "agent":
-                continue
-            if message_chunk.content:
-                accumulated += str(message_chunk.content)
-                cleaned = self._strip_internal_json_prefix(accumulated)
-                if not cleaned.strip():
-                    continue
-                if cleaned == accumulated and self._has_incomplete_internal_json_prefix(accumulated):
-                    continue
-                if cleaned.strip():
-                    yielded_any = True
-                    yield cleaned
-
-        if accumulated and through_id is not None and self._context_events is not None:
-            self._context_events.clear_events(customer_id, through_id=through_id)
-        if not yielded_any:
-            final = await self.ainvoke_text(
-                thread_id=thread_id,
+        if turn_state is None:
+            raise MergedInputSuppressedError("input merged into previous in-flight turn")
+        try:
+            await self._maybe_compact_thread_context(thread_id=thread_id, customer_id=customer_id)
+            merged_text, through_id = self._prepend_pending_context(
                 customer_id=customer_id,
-                text=text,
+                text=effective_text,
                 include_pending_context=include_pending_context,
             )
-            yield final
+            skill_state = await self._pre_resolve_skill_state(
+                customer_id=customer_id,
+                user_text=merged_text,
+            )
+            config = {"configurable": {"thread_id": thread_id}, "recursion_limit": self.recursion_limit}
+            accumulated = ""
+            yielded_any = False
+            async for message_chunk, metadata in self._graph.astream(
+                {
+                    "messages": [HumanMessage(content=merged_text)],
+                    "customer_id": customer_id,
+                    "thread_id": thread_id,
+                    "tool_error_count": 0,
+                    **skill_state,
+                },
+                config=config,
+                stream_mode="messages",
+            ):
+                if metadata.get("langgraph_node") != "agent":
+                    continue
+                if message_chunk.content:
+                    accumulated += str(message_chunk.content)
+                    cleaned = self._strip_internal_json_prefix(accumulated)
+                    if not cleaned.strip():
+                        continue
+                    if cleaned == accumulated and self._has_incomplete_internal_json_prefix(accumulated):
+                        continue
+                    if cleaned.strip():
+                        yielded_any = True
+                        yield cleaned
+
+            if accumulated and through_id is not None and self._context_events is not None:
+                self._context_events.clear_events(customer_id, through_id=through_id)
+            if not yielded_any:
+                fallback_result = await self._graph.ainvoke(
+                    {
+                        "messages": [HumanMessage(content=merged_text)],
+                        "customer_id": customer_id,
+                        "thread_id": thread_id,
+                        "tool_error_count": 0,
+                        **skill_state,
+                    },
+                    config=config,
+                )
+                fallback_messages = fallback_result.get("messages", [])
+                for message in reversed(fallback_messages):
+                    if isinstance(message, AIMessage) and (message.content or "").strip():
+                        cleaned = self._strip_internal_json_prefix(str(message.content))
+                        if self._has_incomplete_internal_json_prefix(cleaned):
+                            continue
+                        if cleaned.strip():
+                            yield cleaned.strip()
+                            break
+        finally:
+            self._thread_inputs.end_turn(turn_state)
 
     async def classify_wake_event(
         self,
@@ -932,36 +1010,39 @@ class OpenTulpaLangGraphRuntime:
         timeout: float = 20.0,
         retries: int = 2,
     ) -> httpx.Response:
-        retryable_status = {429, 500, 502, 503, 504}
-        retryable_errors = (
-            httpx.ConnectError,
-            httpx.ConnectTimeout,
-            httpx.ReadTimeout,
-            httpx.RemoteProtocolError,
+        return await self._internal_api.request_with_backoff(
+            method=method,
+            path=path,
+            params=params,
+            json_body=json_body,
+            timeout=timeout,
+            retries=retries,
         )
-        for attempt in range(retries + 1):
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.request(
-                        method=method,
-                        url=f"{self.app_url}{path}",
-                        params=params,
-                        json=json_body,
-                        timeout=timeout,
-                    )
-                if response.status_code in retryable_status and attempt < retries:
-                    await asyncio.sleep(0.6 * (2**attempt))
-                    continue
-                return response
-            except retryable_errors:
-                if attempt < retries:
-                    await asyncio.sleep(0.6 * (2**attempt))
-                    continue
-                raise
-        raise RuntimeError("request retry loop exhausted")
 
     def _register_tools(self) -> None:
         self._tools = register_runtime_tools(self)
 
     def _build_graph(self):
         return build_runtime_graph(self)
+
+    async def execute_tool(
+        self,
+        *,
+        action_name: str,
+        action_args: dict[str, Any],
+        customer_id: str | None = None,
+        inject_customer_id: bool = False,
+    ) -> Any:
+        """
+        Public runtime API for tool execution outside normal graph turns.
+
+        Used by approval execution to avoid coupling to private runtime attributes.
+        """
+        await self.start()
+        tool_fn = self._tools.get(str(action_name or "").strip())
+        if tool_fn is None:
+            raise RuntimeError(f"unknown tool: {action_name}")
+        args = action_args if isinstance(action_args, dict) else {}
+        if inject_customer_id and action_name in APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS:
+            args = {**args, "customer_id": str(customer_id or "").strip()}
+        return await tool_fn.ainvoke(args)

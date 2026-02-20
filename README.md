@@ -1,136 +1,139 @@
 # OpenTulpa
 
-Background-capable AI agent built with **LangGraph** (OpenRouter-backed model) and **mem0** for persistent memory.
+OpenTulpa is a safe personal agent backend for developers.
+It combines chat interfaces (Telegram today), tool-calling (LangGraph), memory (mem0), and automation (scheduler/tasks) so one assistant can reason, execute, and persist context across sessions while gating external-impact actions through approvals.
 
-## Architecture
+Developer-first personal agent runtime built on LangGraph, OpenRouter, and mem0.
 
-- **FastAPI** (port `8000`): health endpoints, internal APIs, Telegram webhook.
-- **LangGraph runtime** (in-process): tool-calling agent with SQLite checkpoint persistence.
-- **Approval broker** (upstream guardrail): external-impact action gating with interface adapters.
-- **mem0**: persistent user memory (add/search).
-- **Scheduler + Task services**: background orchestration, wake queue, and artifacts.
+OpenTulpa is optimized for building a reliable assistant you can actually modify: clear Python code, explicit action-time guardrails, persistent user context, and scheduler/task orchestration.
 
-## Prerequisites
+## Why OpenTulpa
 
-- Python 3.10+
-- `OPENROUTER_API_KEY` (required for agent + memory model calls)
-- Optional: `TELEGRAM_BOT_TOKEN`
-- Optional: `SLACK_BOT_TOKEN`
+- Pragmatic Python stack: FastAPI + LangGraph + SQLite + mem0.
+- Strong action safety model: external-impact operations require approval.
+- Persistent behavior control: per-user directive + timezone + memory.
+- Built for iterative automation: routines, wake queue, task artifacts, and tool calls.
+- Clean modular API surface: route modules split by concern.
 
-## Run
+## OpenTulpa vs OpenClaw (dev view)
+
+OpenClaw (from its README/docs) is broad and platform-heavy: many channels, apps, and ecosystem surface.
+
+OpenTulpa takes a narrower stance:
+
+- Scope: smaller surface area, easier to reason about and fork quickly.
+- Runtime model: in-process LangGraph with explicit tool APIs and checkpoints.
+- Safety posture: approval broker wired into execution path for external-impact effects.
+- Developer ergonomics: modular routes, explicit services, and straightforward extension points.
+
+If you want maximal channel/platform breadth, OpenClaw has more out-of-the-box surface.
+If you want a simpler codebase with explicit control over agent behavior and safety, OpenTulpa is usually easier to evolve.
+
+## Strengths
+
+- Action-time guardrails, not brittle keyword matching.
+- Deterministic approval lifecycle (`pending -> approved/denied/expired -> executed`).
+- Per-user state model (directive overwrite, timezone profile, long-term memory).
+- Telegram-first UX with streaming, files, links, images, voice transcription.
+- Good refactorability: API routes separated into focused modules.
+
+## Capabilities
+
+- Conversational assistant with persistent per-user identity (`telegram_<user_id>`), memory, directive, and timezone context.
+- Tool-driven web workflows: web search, exact link content retrieval, and browser automation tasks (when configured).
+- File intelligence: ingest/search/get/analyze uploaded files (PDF, DOCX, images, text, audio/voice).
+- Voice handling: transcribes Telegram voice notes and injects transcript into turn context.
+- Messaging/media actions: send stored files and web-fetched images back to user sessions.
+- Automation: create/list/delete scheduled routines, wake events, and task orchestration with artifacts.
+- Code/task execution path: sandboxed terminal/file operations for controlled automation tasks.
+
+## Use Cases
+
+- Background integration worker: register and post to Moltbook through a scheduled/background workflow while preserving a consistent assistant personality and tone.
+- Market watcher: write scripts + custom parsers that run every few hours to fetch current stock data, generate analysis, and send compact updates.
+- API workflow builder: add API keys through chat setup, connect external APIs, and compose custom multi-step workflows by chatting with OpenTulpa.
+- Growth autopilot: create an AgentsMail identity, sign up to relevant resources/social networks, and publish posts based on trend signals.
+- Personal CRM + ops copilot: track contacts, reminders, follow-ups, and next actions.
+- Sales/research assistant: discover targets, enrich data, and draft outreach variants.
+- Inbox and notification triage: summarize noisy streams and escalate only important items.
+- Incident/runbook assistant: detect failures, collect diagnostics, suggest fixes, and notify.
+
+## Skill System
+
+OpenTulpa supports reusable skills as first-class runtime assets:
+
+- Skill scopes: `user` and `global`, with user-overrides-global precedence.
+- Storage: each skill is persisted as `SKILL.md` (+ optional supporting files) and indexed in SQLite.
+- Runtime behavior: agent lists available skills, selects relevant ones via model reasoning, loads matched skill content, then executes with tool calls.
+- CRUD tooling: `skill_list`, `skill_get`, `skill_upsert`, `skill_delete`.
+- Default behavior: a built-in skill-creator baseline is provisioned so the agent can help users define new reusable workflows.
+
+## Quick Start (Telegram in Minutes)
+
+1. Create a Telegram bot with BotFather:
+   - Open Telegram, chat with `@BotFather`
+   - Run `/newbot`
+   - Copy the bot token
+2. Set the minimum env vars in `.env`:
+
+```bash
+OPENROUTER_API_KEY=your_openrouter_key
+TELEGRAM_BOT_TOKEN=your_botfather_token
+```
+
+3. Start OpenTulpa:
 
 ```bash
 ./start.sh
 ```
 
-- API: `http://localhost:8000`
-- Health: `http://localhost:8000/healthz`
-- Agent health: `http://localhost:8000/agent/healthz`
+4. Ensure your Telegram webhook points to `/webhook/telegram` (via your tunnel/public URL setup), then send `/start` to your bot.
 
-If `OPENROUTER_API_KEY` is missing, FastAPI still starts for setup flows, but chat remains disabled until the key is set and the app is restarted.
+That is enough to get a working personal agent.
 
-## Observability
+Health checks:
 
-Telemetry/tracing is configured directly in OpenRouter (built-in provider traces in the OpenRouter dashboard).
+- `http://localhost:8000/healthz`
+- `http://localhost:8000/agent/healthz`
 
-- This repository does not run a local telemetry stack.
-- No local OpenTelemetry/OpenLIT instrumentation is required for normal operation.
+## Core Config
 
-## Environment
-
-See `.env.example` for full configuration. Core variables:
+See `.env.example`. Most important:
 
 - `OPENROUTER_API_KEY`
-- `BROWSER_USE_API_KEY` (optional, enables interactive browser tasks)
 - `LLM_MODEL` (default `gemini-3-flash-preview`)
-- `OPENROUTER_BASE_URL` (default `https://openrouter.ai/api/v1`)
-- `OPENROUTER_EMBEDDING_MODEL` (default `openai/text-embedding-3-small`)
-- `BROWSER_USE_BASE_URL` (default `https://api.browser-use.com/api/v2`)
-- `MEM0_QDRANT_PATH` (default `.opentulpa/qdrant`)
-- `MEM0_QDRANT_ON_DISK` (default `true`)
-- `AGENT_CHECKPOINT_DB_PATH` (default `.opentulpa/langgraph_checkpoints.sqlite`)
-- `AGENT_RECURSION_LIMIT` (default `30`)
-- `AGENT_CONTEXT_TOKEN_LIMIT` (default `250000`, estimated tokens before compaction)
-- `AGENT_CONTEXT_ROLLUP_TOKENS` (default `100000`, oldest estimated tokens summarized per compaction)
+- `OPENROUTER_BASE_URL`
+- `OPENROUTER_EMBEDDING_MODEL`
+- `AGENT_CONTEXT_TOKEN_LIMIT` (default `250000`)
+- `AGENT_CONTEXT_ROLLUP_TOKENS` (default `100000`)
+- `BROWSER_USE_API_KEY` / `BROWSER_USE_BASE_URL` (optional browser automation)
 
-## Telegram mode
+## Safety Model (External Impact)
 
-- Webhook endpoint: `POST /webhook/telegram`
-- One Telegram chat maps to one persistent LangGraph thread.
-- Stable customer id per user: `telegram_<user_id>`
-- Telegram is just the interface; preference/directive persistence is handled in the LangGraph layer.
+Approval checks happen at tool execution precheck.
 
-Commands:
+- Self-targeted replies/files to the current user session: allowed.
+- External recipient or unknown scope + side effects/cost: approval required.
+- Unknown/uncertain classification: fail closed to approval.
+- Approvals are origin-user-only, single-use, and expire (default 10 min).
 
-- `/start` or `/help`
-- `/status`
-- `/setup`
-- `/set KEY VALUE` or `/setenv KEY VALUE`
-- `/cancel`
+Failure behavior:
 
-You can also set long-lived behavior preferences in plain language during normal chat, for example:
-- "From now on, keep answers very concise."
-- "When writing code, prefer small pure functions and type hints."
-- "Forget the previous writing style preferences."
+- Guardrail classifier errors default to approval-required.
+- Approval store/adapter failure blocks side-effect action.
+- Wake relay failures are captured to context events for recovery.
 
-The agent stores one active persistent directive per user and overwrites it when you provide a new one.
+Use this before adding integrations:
 
-For links and documents, you can send a URL directly (HTML, PDF, DOCX, images). The LangGraph layer
-uses a dedicated content-fetch tool to read exact links, and falls back to web search only when needed.
-For web images, the agent can search URLs, validate the URL resolves to an `image/*` file, download it,
-and send it to Telegram.
-Telegram voice messages are transcribed via OpenRouter audio input and injected into the current user
-turn context as text.
-For interactive web tasks (dynamic sites, multi-step browsing), the agent can call Browser Use Cloud
-tools when `BROWSER_USE_API_KEY` is configured.
+- [`docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md`](docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md)
 
-Scheduled routines default to direct user notification (`notify_user=true`). To suppress alerts,
-explicitly ask for no notification (for example: "run this silently" or "don't alert me").
+## Architecture
 
-Each turn injects live server time + best-known user local time/UTC offset into the model context.
-If the user timezone is unknown, server timezone is used as a fallback until the agent stores a user offset.
-Customer metadata (directive + timezone/offset) is stored in a unified customer profile store.
-
-## External-Impact Approval Model
-
-Approval checks are evaluated at action execution time (tool call precheck), not keyword matching on user text.
-
-- Normal replies/files to the current user session are allowed without approval.
-- Actions with potential external impact (posting, purchases, costly side effects, unknown recipient scope) require approval.
-- Unknown scope is treated as `approval required` (fail-closed).
-
-State machine (`pending_approvals`):
-
-- `pending` -> `approved` (origin user approves)
-- `pending` -> `denied` (origin user denies)
-- `pending` -> `expired` (TTL reached, default 10 minutes)
-- `approved` -> `executed` (single-use execution path)
-
-Rules:
-
-- Only the origin user can approve/deny.
-- Approval tokens are single-use; replay is blocked.
-- Interface routing is same-interface first (Telegram inline buttons), with text-token fallback where needed.
-
-## Failure Behavior
-
-- Guardrail classifier uncertainty/error: requires approval (never auto-allow).
-- Approval store/adapters unavailable: side-effect action fails closed.
-- Execution after approval failing at runtime: approval is not silently retried as a fresh side effect.
-- Timeout/expiry: action is blocked and must be re-requested.
-- Wake/notification failures: event is written to context event store for recovery on next turn.
-
-## Adding External Tools Safely
-
-Use the checklist in [`docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md`](docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md) before adding any new integration that can affect external recipients, incur cost, or mutate third-party systems.
-
-## Project layout
-
-- `src/opentulpa/agent` — LangGraph runtime (`runtime.py`), state models, and utilities
-- `src/opentulpa/api` — FastAPI app composition and internal APIs
-- `src/opentulpa/api/routes` — Route modules split by concern (health, files, scheduler, tasks, etc.)
-- `src/opentulpa/approvals` — Approval broker, policy, store, and interface adapters
-- `src/opentulpa/interfaces/telegram` — Telegram client/formatter/chat service
-- `src/opentulpa/integrations` — Slack and web-search integrations
-- `src/opentulpa/tasks` — sandbox, task service, wake queue
-- `tulpa_stuff` — dynamic integration artifacts
+- `src/opentulpa/agent`: LangGraph runtime, graph, tools, context handling.
+- `src/opentulpa/api`: app composition.
+- `src/opentulpa/api/routes`: focused route modules (`health`, `files`, `skills`, `scheduler`, `tasks`, etc.).
+- `src/opentulpa/approvals`: policy, broker, adapters, persistence.
+- `src/opentulpa/interfaces/telegram`: transport client + chat orchestration.
+- `src/opentulpa/integrations`: web search and Browser Use clients.
+- `src/opentulpa/tasks`: sandboxed execution, task service, wake queue.
+- `tulpa_stuff`: dynamic/generated integration artifacts.

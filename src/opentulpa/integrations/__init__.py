@@ -1,1 +1,1 @@
-"""Integrations: Slack and web-search connectors."""
+"""Integrations: web-search and external service connectors."""

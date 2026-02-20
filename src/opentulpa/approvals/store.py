@@ -148,6 +148,66 @@ class PendingApprovalStore:
             ).fetchone()
         return self._row_to_record(row) if row else None
 
+    def find_recent_matching(
+        self,
+        *,
+        customer_id: str,
+        thread_id: str,
+        action_name: str,
+        action_args_json: str | None = None,
+        summary: str | None = None,
+        statuses: tuple[str, ...] = ("approved", "executed"),
+        lookback_seconds: int = 600,
+    ) -> ApprovalRecord | None:
+        self.expire_due()
+        safe_statuses = tuple(str(s or "").strip() for s in statuses if str(s or "").strip())
+        if not safe_statuses:
+            return None
+        filters = [
+            "customer_id=?",
+            "thread_id=?",
+            "action_name=?",
+            f"status IN ({','.join(['?'] * len(safe_statuses))})",
+        ]
+        values: list[Any] = [
+            str(customer_id or "").strip(),
+            str(thread_id or "").strip(),
+            str(action_name or "").strip(),
+            *safe_statuses,
+        ]
+        if action_args_json is not None:
+            filters.append("action_args_json=?")
+            values.append(str(action_args_json))
+        if summary is not None:
+            filters.append("summary=?")
+            values.append(str(summary))
+
+        query = f"""
+            SELECT *
+            FROM pending_approvals
+            WHERE {' AND '.join(filters)}
+            ORDER BY created_at DESC
+            LIMIT 20
+        """
+        with self._conn() as conn:
+            rows = conn.execute(query, tuple(values)).fetchall()
+
+        if not rows:
+            return None
+        now = self._utc_now()
+        cutoff = now - timedelta(seconds=max(0, int(lookback_seconds)))
+        for row in rows:
+            record = self._row_to_record(row)
+            try:
+                created = datetime.fromisoformat(record.created_at)
+            except Exception:
+                continue
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if created >= cutoff:
+                return record
+        return None
+
     def create_pending(
         self,
         *,

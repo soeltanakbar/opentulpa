@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger(__name__)
 
 
 def register_approval_routes(
@@ -24,6 +27,7 @@ def register_approval_routes(
         decision: str,
         actor_interface: str,
         actor_id: str,
+        enqueue_wake: bool = True,
     ) -> dict[str, Any]:
         broker = get_approvals()
         resolved = await broker.decide(
@@ -32,7 +36,11 @@ def register_approval_routes(
             actor_interface=actor_interface,
             actor_id=actor_id,
         )
-        if bool(resolved.get("ok")) and str(resolved.get("status", "")).strip() == "approved":
+        if (
+            enqueue_wake
+            and bool(resolved.get("ok"))
+            and str(resolved.get("status", "")).strip() == "approved"
+        ):
             payload = {
                 "type": "approval_event",
                 "event_type": "approved",
@@ -117,39 +125,23 @@ def register_approval_routes(
         if agent_runtime is None:
             return JSONResponse(status_code=503, content={"detail": "agent runtime unavailable"})
 
-        inject_customer_id = {
-            "memory_search",
-            "memory_add",
-            "uploaded_file_search",
-            "uploaded_file_get",
-            "uploaded_file_send",
-            "web_image_send",
-            "uploaded_file_analyze",
-            "skill_list",
-            "skill_get",
-            "skill_upsert",
-            "skill_delete",
-            "directive_get",
-            "directive_set",
-            "directive_clear",
-            "time_profile_get",
-            "time_profile_set",
-            "routine_list",
-            "routine_create",
-            "routine_delete",
-            "automation_delete",
-            "browser_use_run",
-        }
-
         async def _approved_executor(action_name: str, action_args: dict[str, Any], cid: str) -> Any:
-            await agent_runtime.start()
-            tool_fn = agent_runtime._tools.get(action_name)
-            if tool_fn is None:
-                raise RuntimeError(f"unknown tool for approved execution: {action_name}")
-            args = action_args if isinstance(action_args, dict) else {}
-            if action_name in inject_customer_id:
-                args = {**args, "customer_id": cid}
-            return await tool_fn.ainvoke(args)
+            safe_args = action_args if isinstance(action_args, dict) else {}
+            if hasattr(agent_runtime, "execute_tool"):
+                return await agent_runtime.execute_tool(
+                    action_name=action_name,
+                    action_args=safe_args,
+                    customer_id=cid,
+                    inject_customer_id=True,
+                )
+            # Backward-compatible fallback for lightweight runtimes in tests.
+            tools = getattr(agent_runtime, "_tools", {})
+            if not isinstance(tools, dict):
+                raise RuntimeError("agent runtime does not expose executable tools")
+            tool = tools.get(str(action_name or "").strip())
+            if tool is None or not hasattr(tool, "ainvoke"):
+                raise RuntimeError(f"unknown tool: {action_name}")
+            return await tool.ainvoke(safe_args)
 
         try:
             result = await broker.execute_approved_action(
@@ -160,7 +152,22 @@ def register_approval_routes(
         except Exception as exc:
             return JSONResponse(status_code=500, content={"detail": f"execute failed: {exc}"})
         if not bool(result.get("ok")):
-            return JSONResponse(status_code=400, content=result)
+            error = str(result.get("error", "")).strip()
+            status_code = 400
+            if error == "approval_not_found":
+                status_code = 404
+            elif error == "customer_mismatch":
+                status_code = 403
+            elif error.startswith("approval_not_executable:"):
+                status_code = 409
+            logger.warning(
+                "Approval execute rejected (status=%s approval_id=%s customer_id=%s error=%s)",
+                status_code,
+                approval_id,
+                customer_id,
+                error or "unknown_error",
+            )
+            return JSONResponse(status_code=status_code, content=result)
         return result
 
     @app.get("/internal/approvals/{approval_id}")

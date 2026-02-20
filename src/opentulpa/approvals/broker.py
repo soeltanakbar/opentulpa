@@ -425,6 +425,63 @@ class ApprovalBroker:
             decision.delivery_mode = delivery_mode
             return asdict(decision)
 
+        # Reuse recent non-pending decisions for exact same action intent.
+        recent_same_args = self._store.find_recent_matching(
+            customer_id=intent.customer_id,
+            thread_id=intent.thread_id,
+            action_name=intent.action_name,
+            action_args_json=args_json,
+            statuses=("approved", "executed"),
+            lookback_seconds=self._ttl_seconds,
+        )
+        if recent_same_args is not None:
+            if recent_same_args.status == "approved":
+                decision.gate = "allow"
+                decision.reason = "reuse_recent_approved"
+                decision.status = recent_same_args.status
+                decision.expires_at = recent_same_args.expires_at
+                return asdict(decision)
+            # Prevent prompt loops requesting approval repeatedly for the same external action.
+            decision.gate = "deny"
+            decision.reason = "already_executed_recent_duplicate"
+            decision.status = recent_same_args.status
+            decision.expires_at = recent_same_args.expires_at
+            decision.approval_id = None
+            decision.delivery_mode = None
+            return asdict(decision)
+
+        # Browser tasks often carry transient args (session ids/timeouts). Deduplicate by summary.
+        if intent.action_name == "browser_use_run":
+            recent_browser = self._store.find_recent_matching(
+                customer_id=intent.customer_id,
+                thread_id=intent.thread_id,
+                action_name=intent.action_name,
+                summary=intent.summary,
+                statuses=("pending", "approved", "executed"),
+                lookback_seconds=self._ttl_seconds,
+            )
+            if recent_browser is not None:
+                if recent_browser.status == "pending":
+                    delivery_mode = await self._deliver_challenge(recent_browser)
+                    decision.approval_id = recent_browser.id
+                    decision.status = recent_browser.status
+                    decision.expires_at = recent_browser.expires_at
+                    decision.delivery_mode = delivery_mode
+                    return asdict(decision)
+                if recent_browser.status == "approved":
+                    decision.gate = "allow"
+                    decision.reason = "reuse_recent_approved_browser_task"
+                    decision.status = recent_browser.status
+                    decision.expires_at = recent_browser.expires_at
+                    return asdict(decision)
+                decision.gate = "deny"
+                decision.reason = "already_executed_recent_browser_task"
+                decision.status = recent_browser.status
+                decision.expires_at = recent_browser.expires_at
+                decision.approval_id = None
+                decision.delivery_mode = None
+                return asdict(decision)
+
         approval_id = new_short_id("apr")
         record = self._store.create_pending(
             approval_id=approval_id,
@@ -509,7 +566,14 @@ class ApprovalBroker:
         if str(record.customer_id) != str(customer_id):
             return {"ok": False, "error": "customer_mismatch"}
         if record.status == "executed":
-            return {"ok": False, "error": "approval_already_executed"}
+            # Idempotent replay handling: a duplicate execute call should be safe.
+            return {
+                "ok": True,
+                "approval_id": record.id,
+                "status": "executed",
+                "action_name": record.action_name,
+                "already_executed": True,
+            }
         if record.status != "approved":
             return {"ok": False, "error": f"approval_not_executable:{record.status}"}
 
