@@ -92,6 +92,8 @@ def build_runtime_graph(runtime: Any):
             "call fetch_link_content first (do not rely only on web_search). "
             "When users refer to files they uploaded earlier (e.g. 'the table/orders file'), "
             "use uploaded_file_search, then uploaded_file_get/uploaded_file_analyze/uploaded_file_send as needed. "
+            "If user asks to send/share a file back in this chat, call uploaded_file_send exactly once "
+            "for the selected file and only state it was sent after a successful tool result. "
             "Use known link aliases (link_*) for very long URLs to reduce copy errors. "
             "If you output a known alias ID, it will be expanded to full URL for the user. "
             "When you are unsure about prior user-specific facts/preferences/IDs because they are not in short-term context, "

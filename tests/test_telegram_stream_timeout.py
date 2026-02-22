@@ -19,6 +19,7 @@ class _FakeTelegramClient:
         self.bot_token = bot_token
         self.calls: list[tuple[int | str, str, int | None, str | None]] = []
         self._next_id = 100
+        self.chat_actions: list[tuple[int | str, str]] = []
 
     async def upsert_stream_message(
         self,
@@ -35,6 +36,15 @@ class _FakeTelegramClient:
             self._next_id += 1
             return self._next_id
         return message_id
+
+    async def send_chat_action(
+        self,
+        *,
+        chat_id: int | str,
+        action: str = "typing",
+    ) -> bool:
+        self.chat_actions.append((chat_id, action))
+        return True
 
 
 @pytest.mark.asyncio
@@ -75,3 +85,4 @@ async def test_stream_timeout_returns_user_visible_timeout(monkeypatch: pytest.M
     # One automatic retry is attempted before surfacing timeout.
     assert calls["count"] >= 2
     assert any("timed out" in text.lower() for _, text, _, _ in fake_client.calls)
+    assert fake_client.chat_actions

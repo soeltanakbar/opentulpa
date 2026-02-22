@@ -52,40 +52,17 @@ def debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[str
         pass
 
 
-async def _push_loading_sequence(
+async def _emit_typing_until_done(
     *,
     client: TelegramClient,
     chat_id: int,
-    message_id: int | None = None,
-    delay_seconds: float = 0.22,
-    stop_event: asyncio.Event | None = None,
-    previous_marker: str | None = None,
-) -> tuple[int | None, str | None]:
-    sequence = ("...", "..", ".", "..", "...")
-    current_id = message_id
-    last_marker = previous_marker
-    for marker in sequence:
-        if stop_event is not None and stop_event.is_set():
-            break
-        if marker == last_marker:
-            continue
-        current_id = (
-            await client.upsert_stream_message(
-                chat_id=chat_id,
-                text=marker,
-                message_id=current_id,
-                parse_mode=None,
-                allow_fallback_send=False,
-            )
-            or current_id
-        )
-        last_marker = marker
-        if stop_event is None:
-            await asyncio.sleep(delay_seconds)
-            continue
+    stop_event: asyncio.Event,
+) -> None:
+    while not stop_event.is_set():
+        with suppress(Exception):
+            await client.send_chat_action(chat_id=chat_id, action="typing")
         with suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(stop_event.wait(), timeout=delay_seconds)
-    return current_id, last_marker
+            await asyncio.wait_for(stop_event.wait(), timeout=4.0)
 
 
 async def stream_langgraph_reply_to_telegram(
@@ -103,42 +80,10 @@ async def stream_langgraph_reply_to_telegram(
     client = TelegramClient(bot_token)
     waiting_for_segment = True
     stream_state: dict[str, int | None] = {"message_id": stream_message_id}
-    loader_last_marker: dict[str, str | None] = {"value": None}
-    loader_stop: asyncio.Event | None = None
-    loader_task: asyncio.Task[None] | None = None
-
-    async def _start_loader(*, new_message: bool) -> None:
-        nonlocal loader_stop, loader_task
-        if loader_task is not None and not loader_task.done():
-            return
-        if new_message:
-            stream_state["message_id"] = None
-            loader_last_marker["value"] = None
-        loader_stop = asyncio.Event()
-
-        async def _loader_loop(local_stop: asyncio.Event) -> None:
-            while not local_stop.is_set():
-                stream_state["message_id"], loader_last_marker["value"] = await _push_loading_sequence(
-                    client=client,
-                    chat_id=chat_id,
-                    message_id=stream_state.get("message_id"),
-                    stop_event=local_stop,
-                    previous_marker=loader_last_marker["value"],
-                )
-
-        loader_task = asyncio.create_task(_loader_loop(loader_stop))
-
-    async def _stop_loader() -> None:
-        nonlocal loader_stop, loader_task
-        if loader_stop is not None and not loader_stop.is_set():
-            loader_stop.set()
-        if loader_task is not None:
-            with suppress(Exception):
-                await loader_task
-        loader_stop = None
-        loader_task = None
-
-    await _start_loader(new_message=False)
+    typing_stop = asyncio.Event()
+    typing_task = asyncio.create_task(
+        _emit_typing_until_done(client=client, chat_id=chat_id, stop_event=typing_stop)
+    )
     suppressed = False
     first_token_timeout_s = 90.0
     first_token_retry_timeout_s = 180.0
@@ -206,7 +151,6 @@ async def stream_langgraph_reply_to_telegram(
                 with suppress(Exception):
                     async with asyncio.timeout(1.0):
                         await stream.aclose()
-                await _stop_loader()
                 stream_message_id = stream_state.get("message_id")
                 timeout_text = (
                     "Still working, but the model response timed out. "
@@ -235,8 +179,7 @@ async def stream_langgraph_reply_to_telegram(
                 if not waiting_for_segment:
                     waiting_for_segment = True
                     last_streamed = ""
-                    await _stop_loader()
-                    await _start_loader(new_message=True)
+                    stream_state["message_id"] = None
                 continue
             if not isinstance(partial, str):
                 continue
@@ -248,10 +191,8 @@ async def stream_langgraph_reply_to_telegram(
             if last_streamed and not current.startswith(last_streamed):
                 waiting_for_segment = True
                 last_streamed = ""
-                await _stop_loader()
-                await _start_loader(new_message=True)
+                stream_state["message_id"] = None
             if waiting_for_segment:
-                await _stop_loader()
                 waiting_for_segment = False
             stream_message_id = stream_state.get("message_id")
             stream_message_id = (
@@ -274,12 +215,26 @@ async def stream_langgraph_reply_to_telegram(
             customer_id,
         )
         suppressed = True
+    except Exception:
+        if next_chunk_task is not None and not next_chunk_task.done():
+            next_chunk_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                async with asyncio.timeout(1.0):
+                    await next_chunk_task
+        if not typing_stop.is_set():
+            typing_stop.set()
+        with suppress(Exception):
+            await typing_task
+        raise
     if next_chunk_task is not None and not next_chunk_task.done():
         next_chunk_task.cancel()
         with suppress(asyncio.CancelledError, Exception):
             async with asyncio.timeout(1.0):
                 await next_chunk_task
-    await _stop_loader()
+    if not typing_stop.is_set():
+        typing_stop.set()
+    with suppress(Exception):
+        await typing_task
     if not suppressed and not final_reply:
         logger.error(
             "telegram.stream no_final_reply chat_id=%s thread_id=%s customer_id=%s",
