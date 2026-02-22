@@ -78,6 +78,11 @@ def register_approval_routes(
         thread_id = str(body.get("thread_id", "")).strip()
         action_name = str(body.get("action_name", "")).strip()
         action_args = body.get("action_args") if isinstance(body.get("action_args"), dict) else {}
+        action_note = (
+            str(body.get("action_note", "")).strip()
+            or str(body.get("guardrail_note", "")).strip()
+            or None
+        )
         origin_interface = str(body.get("origin_interface", "")).strip() or None
         origin_user_id = str(body.get("origin_user_id", "")).strip() or None
         origin_conversation_id = str(body.get("origin_conversation_id", "")).strip() or None
@@ -91,6 +96,7 @@ def register_approval_routes(
             thread_id=thread_id,
             action_name=action_name,
             action_args=action_args,
+            action_note=action_note,
             origin_interface=origin_interface,
             origin_user_id=origin_user_id,
             origin_conversation_id=origin_conversation_id,
@@ -101,7 +107,8 @@ def register_approval_routes(
     async def internal_approvals_decide(request: Request) -> Any:
         body = await request.json()
         approval_id = str(body.get("approval_id", "")).strip()
-        decision = str(body.get("decision", "")).strip().lower()
+        decision_raw = str(body.get("decision", "")).strip().lower()
+        decision = decision_raw
         actor_interface = str(body.get("actor_interface", "")).strip()
         actor_id = str(body.get("actor_id", "")).strip()
         if not approval_id or decision not in {"approve", "deny"} or not actor_interface or not actor_id:

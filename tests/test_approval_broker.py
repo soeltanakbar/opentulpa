@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -21,12 +23,20 @@ class _CaptureAdapter:
 
 
 class _ClassifierRuntime:
-    async def classify_guardrail_intent(self, *, action_name: str, action_args: dict[str, object]) -> dict[str, object]:
+    async def classify_guardrail_intent(
+        self,
+        *,
+        action_name: str,
+        action_args: dict[str, object],
+        action_note: str | None = None,
+    ) -> dict[str, object]:
+        _ = action_note
         if action_name == "browser_use_run":
             task = str(action_args.get("task", "")).strip().lower()
             if "submit" in task or "buy" in task:
                 return {
                     "ok": True,
+                    "gate": "require_approval",
                     "impact_type": "write",
                     "recipient_scope": "unknown",
                     "confidence": 0.9,
@@ -34,16 +44,67 @@ class _ClassifierRuntime:
                 }
             return {
                 "ok": True,
+                "gate": "allow",
                 "impact_type": "read",
                 "recipient_scope": "unknown",
                 "confidence": 0.9,
                 "reason": "task is read-only",
             }
+        if action_name == "routine_create":
+            combined = (
+                f"{str(action_args.get('name', ''))} "
+                f"{str(action_args.get('message', ''))}"
+            ).strip().lower()
+            if "post to x" in combined or "autopost" in combined:
+                return {
+                    "ok": True,
+                    "gate": "require_approval",
+                    "impact_type": "write",
+                    "recipient_scope": "external",
+                    "confidence": 0.9,
+                    "reason": "routine targets external posting",
+                }
+            return {
+                "ok": True,
+                "gate": "allow",
+                "impact_type": "read",
+                "recipient_scope": "self",
+                "confidence": 0.85,
+                "reason": "routine is internal research/summarization",
+            }
+        if action_name in {"slack_post", "email_send"}:
+            return {
+                "ok": True,
+                "gate": "require_approval",
+                "impact_type": "write",
+                "recipient_scope": "external",
+                "confidence": 0.9,
+                "reason": "external side effects",
+            }
+        if action_name == "uploaded_file_send":
+            return {
+                "ok": True,
+                "gate": "allow",
+                "impact_type": "write",
+                "recipient_scope": "self",
+                "confidence": 0.9,
+                "reason": "self-targeted send",
+            }
+        if action_name in {"routine_delete", "automation_delete"}:
+            return {
+                "ok": True,
+                "gate": "allow",
+                "impact_type": "read",
+                "recipient_scope": "self",
+                "confidence": 0.9,
+                "reason": "internal action",
+            }
         if action_name == "tulpa_run_terminal":
             return {"ok": False, "error": "classifier_down"}
         return {
             "ok": True,
-            "impact_type": "write",
+            "gate": "allow",
+            "impact_type": "read",
             "recipient_scope": "unknown",
             "confidence": 0.7,
             "reason": "default",
@@ -60,14 +121,30 @@ def _origin_resolver(customer_id: str, thread_id: str) -> dict[str, str]:
     }
 
 
+@pytest.fixture
+def broker_factory(tmp_path: Path) -> Callable[..., tuple[ApprovalBroker, _CaptureAdapter]]:
+    def _make(
+        *,
+        adapter: _CaptureAdapter | None = None,
+        runtime: Any | None = None,
+    ) -> tuple[ApprovalBroker, _CaptureAdapter]:
+        resolved_adapter = adapter or _CaptureAdapter()
+        broker = ApprovalBroker(
+            store=PendingApprovalStore(db_path=tmp_path / "approvals.db"),
+            runtime=runtime or _ClassifierRuntime(),
+            adapters={"telegram": resolved_adapter},
+            origin_resolver=_origin_resolver,
+        )
+        return broker, resolved_adapter
+
+    return _make
+
+
 @pytest.mark.asyncio
-async def test_self_target_send_is_not_gated(tmp_path: Path) -> None:
-    broker = ApprovalBroker(
-        store=PendingApprovalStore(db_path=tmp_path / "approvals.db"),
-        runtime=_ClassifierRuntime(),
-        adapters={"telegram": _CaptureAdapter()},
-        origin_resolver=_origin_resolver,
-    )
+async def test_self_target_send_is_not_gated(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, _ = broker_factory()
     result = await broker.evaluate_action(
         customer_id="telegram_42",
         thread_id="chat-42",
@@ -79,14 +156,26 @@ async def test_self_target_send_is_not_gated(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_external_action_requires_approval_and_reuses_pending(tmp_path: Path) -> None:
-    adapter = _CaptureAdapter()
-    broker = ApprovalBroker(
-        store=PendingApprovalStore(db_path=tmp_path / "approvals.db"),
-        runtime=_ClassifierRuntime(),
-        adapters={"telegram": adapter},
-        origin_resolver=_origin_resolver,
+async def test_routine_delete_is_internal_no_approval(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, adapter = broker_factory()
+    result = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="chat-42",
+        action_name="routine_delete",
+        action_args={"routine_id": "rtn_abc", "customer_id": "telegram_42"},
     )
+    assert result["gate"] == "allow"
+    assert result.get("approval_id") is None
+    assert len(adapter.sent) == 0
+
+
+@pytest.mark.asyncio
+async def test_external_action_requires_approval_and_reuses_pending(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, adapter = broker_factory()
     request = {
         "customer_id": "telegram_42",
         "thread_id": "chat-42",
@@ -102,13 +191,10 @@ async def test_external_action_requires_approval_and_reuses_pending(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_browser_read_vs_write_intent(tmp_path: Path) -> None:
-    broker = ApprovalBroker(
-        store=PendingApprovalStore(db_path=tmp_path / "approvals.db"),
-        runtime=_ClassifierRuntime(),
-        adapters={"telegram": _CaptureAdapter()},
-        origin_resolver=_origin_resolver,
-    )
+async def test_browser_read_vs_write_intent(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, _ = broker_factory()
     read_result = await broker.evaluate_action(
         customer_id="telegram_42",
         thread_id="chat-42",
@@ -126,13 +212,10 @@ async def test_browser_read_vs_write_intent(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_classifier_failure_defaults_to_approval_required(tmp_path: Path) -> None:
-    broker = ApprovalBroker(
-        store=PendingApprovalStore(db_path=tmp_path / "approvals.db"),
-        runtime=_ClassifierRuntime(),
-        adapters={"telegram": _CaptureAdapter()},
-        origin_resolver=_origin_resolver,
-    )
+async def test_classifier_failure_defaults_to_approval_required(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, _ = broker_factory()
     result = await broker.evaluate_action(
         customer_id="telegram_42",
         thread_id="chat-42",
@@ -144,31 +227,25 @@ async def test_classifier_failure_defaults_to_approval_required(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_local_terminal_command_is_not_gated_even_if_classifier_unavailable(tmp_path: Path) -> None:
-    broker = ApprovalBroker(
-        store=PendingApprovalStore(db_path=tmp_path / "approvals.db"),
-        runtime=_ClassifierRuntime(),
-        adapters={"telegram": _CaptureAdapter()},
-        origin_resolver=_origin_resolver,
-    )
+async def test_local_terminal_command_requires_approval_when_classifier_unavailable(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, _ = broker_factory()
     result = await broker.evaluate_action(
         customer_id="telegram_42",
         thread_id="chat-42",
         action_name="tulpa_run_terminal",
         action_args={"command": "python3 gmail_setup.py"},
     )
-    assert result["gate"] == "allow"
+    assert result["gate"] == "require_approval"
+    assert result["reason"] == "guardrail_uncertain"
 
 
 @pytest.mark.asyncio
-async def test_exact_duplicate_after_executed_is_denied_without_reprompt(tmp_path: Path) -> None:
-    adapter = _CaptureAdapter()
-    broker = ApprovalBroker(
-        store=PendingApprovalStore(db_path=tmp_path / "approvals.db"),
-        runtime=_ClassifierRuntime(),
-        adapters={"telegram": adapter},
-        origin_resolver=_origin_resolver,
-    )
+async def test_exact_duplicate_after_executed_is_denied_without_reprompt(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, adapter = broker_factory()
     request = {
         "customer_id": "telegram_42",
         "thread_id": "chat-42",
@@ -190,8 +267,17 @@ async def test_exact_duplicate_after_executed_is_denied_without_reprompt(tmp_pat
     assert decided["ok"] is True
     assert decided["status"] == "approved"
 
-    async def _executor(action_name: str, action_args: dict[str, object], customer_id: str) -> dict[str, object]:
-        return {"ok": True, "action_name": action_name, "action_args": action_args, "customer_id": customer_id}
+    async def _executor(
+        action_name: str,
+        action_args: dict[str, object],
+        customer_id: str,
+    ) -> dict[str, object]:
+        return {
+            "ok": True,
+            "action_name": action_name,
+            "action_args": action_args,
+            "customer_id": customer_id,
+        }
 
     executed = await broker.execute_approved_action(
         approval_id=approval_id,
@@ -208,14 +294,99 @@ async def test_exact_duplicate_after_executed_is_denied_without_reprompt(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_browser_task_duplicate_summary_after_executed_is_denied(tmp_path: Path) -> None:
-    adapter = _CaptureAdapter()
-    broker = ApprovalBroker(
-        store=PendingApprovalStore(db_path=tmp_path / "approvals.db"),
-        runtime=_ClassifierRuntime(),
-        adapters={"telegram": adapter},
-        origin_resolver=_origin_resolver,
+async def test_background_thread_external_actions_allow_without_per_run_prompt(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, adapter = broker_factory()
+    first = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="wake_abcd12",
+        action_name="slack_post",
+        action_args={"channel_id": "C123", "text": "hello"},
     )
+    assert first["gate"] == "allow"
+    assert first["reason"] == "background_preauthorized_execution"
+    assert first.get("approval_id") is None
+    assert len(adapter.sent) == 0
+
+    again = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="wake_abcd12",
+        action_name="email_send",
+        action_args={"to": "a@example.com", "subject": "x", "text": "y"},
+    )
+    assert again["gate"] == "allow"
+    assert again["reason"] == "background_preauthorized_execution"
+    assert len(adapter.sent) == 0
+
+
+@pytest.mark.asyncio
+async def test_background_thread_external_routine_creation_still_requires_approval(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, adapter = broker_factory()
+    result = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="wake_abcd12",
+        action_name="routine_create",
+        action_args={
+            "name": "Autopost to X",
+            "schedule": "0 */2 * * *",
+            "message": "Post to X every 2 hours",
+            "customer_id": "telegram_42",
+            "notify_user": True,
+        },
+    )
+    assert result["gate"] == "require_approval"
+    assert result.get("approval_id")
+    assert len(adapter.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_routine_create_internal_schedule_does_not_require_approval(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, _ = broker_factory()
+    result = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="chat-42",
+        action_name="routine_create",
+        action_args={
+            "name": "Morning research digest",
+            "schedule": "0 9 * * *",
+            "message": "Scan AI news and summarize top 5 points here",
+            "customer_id": "telegram_42",
+            "notify_user": True,
+        },
+    )
+    assert result["gate"] == "allow"
+
+
+@pytest.mark.asyncio
+async def test_routine_create_external_schedule_requires_approval(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, _ = broker_factory()
+    result = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="chat-42",
+        action_name="routine_create",
+        action_args={
+            "name": "Autopost to X",
+            "schedule": "0 */2 * * *",
+            "message": "Post to X every 2 hours with a short market reflection",
+            "customer_id": "telegram_42",
+            "notify_user": True,
+        },
+    )
+    assert result["gate"] == "require_approval"
+
+
+@pytest.mark.asyncio
+async def test_browser_task_duplicate_summary_after_executed_is_denied(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, _ = broker_factory()
     first = await broker.evaluate_action(
         customer_id="telegram_42",
         thread_id="chat-42",
@@ -238,7 +409,11 @@ async def test_browser_task_duplicate_summary_after_executed_is_denied(tmp_path:
     )
     assert decided["ok"] is True
 
-    async def _executor(action_name: str, action_args: dict[str, object], customer_id: str) -> dict[str, object]:
+    async def _executor(
+        action_name: str,
+        action_args: dict[str, object],
+        customer_id: str,
+    ) -> dict[str, object]:
         return {"ok": True}
 
     executed = await broker.execute_approved_action(
@@ -248,7 +423,6 @@ async def test_browser_task_duplicate_summary_after_executed_is_denied(tmp_path:
     )
     assert executed["ok"] is True
 
-    # Same task text, drifted transient args: should not reprompt immediately.
     again = await broker.evaluate_action(
         customer_id="telegram_42",
         thread_id="chat-42",
@@ -265,13 +439,10 @@ async def test_browser_task_duplicate_summary_after_executed_is_denied(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_approval_group_waits_until_all_approved(tmp_path: Path) -> None:
-    broker = ApprovalBroker(
-        store=PendingApprovalStore(db_path=tmp_path / "approvals.db"),
-        runtime=_ClassifierRuntime(),
-        adapters={"telegram": _CaptureAdapter()},
-        origin_resolver=_origin_resolver,
-    )
+async def test_approval_group_waits_until_all_approved(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, _ = broker_factory()
     first = await broker.evaluate_action(
         customer_id="telegram_42",
         thread_id="chat-42",

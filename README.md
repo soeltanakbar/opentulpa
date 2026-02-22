@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/opentulpa-logo.png" alt="OpenTulpa Logo" />
+</p>
+
 # OpenTulpa
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)

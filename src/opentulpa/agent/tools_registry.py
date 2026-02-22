@@ -158,6 +158,152 @@ def _compact_browser_use_task_view(
     return result
 
 
+def _sanitize_routine_customer_segment(customer_id: str) -> str:
+    raw = str(customer_id or "").strip().lower()
+    safe = re.sub(r"[^a-z0-9_-]+", "-", raw).strip("-")
+    return (safe or "customer")[:48]
+
+
+def _proactive_heartbeat_routine_id(customer_id: str) -> str:
+    return f"rtn_proactive_{_sanitize_routine_customer_segment(customer_id)}"
+
+
+def _directive_disables_proactive_mode(directive: str) -> bool:
+    text = str(directive or "").strip().lower()
+    if not text:
+        return False
+    patterns = [
+        r"\b(?:disable|turn off|stop|pause|remove)\s+(?:my\s+)?proactive\b",
+        r"\bnot\s+proactive\b",
+        r"\bmode\s*[:=]?\s*non[- ]?proactive\b",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _directive_enables_proactive_mode(directive: str) -> bool:
+    text = str(directive or "").strip().lower()
+    if not text or _directive_disables_proactive_mode(text):
+        return False
+    patterns = [
+        r"\bmode\s*[:=]?\s*proactive\b",
+        r"\bproactive\s+mode\b",
+        r"\bproactive\b",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _extract_heartbeat_interval_hours(directive: str, *, default_hours: int) -> int:
+    text = str(directive or "").strip().lower()
+    interval = max(1, min(int(default_hours), 24))
+    if not text:
+        return interval
+    match = re.search(r"\bevery\s+(\d{1,2})\s*(?:hours?|hrs?|h)\b", text)
+    if match:
+        with suppress(Exception):
+            return max(1, min(int(match.group(1)), 24))
+    if re.search(r"\bevery\s+(?:few)\s+hours?\b", text):
+        return 3
+    if re.search(r"\bevery\s+(?:couple)\s+hours?\b", text):
+        return 2
+    return interval
+
+
+def _build_proactive_heartbeat_prompt(interval_hours: int) -> str:
+    return (
+        "Proactive heartbeat wake. Decide naturally whether to reach out now.\n"
+        "Goals: build connection, show care, and be useful without being spammy.\n"
+        "Rules:\n"
+        "- Use memory/context and recent conversation themes.\n"
+        "- If no meaningful outreach is appropriate now, return exactly __NO_NOTIFY__.\n"
+        "- If outreach is appropriate, send one concise, natural message.\n"
+        "- Prefer varied check-ins/questions/shares over repetitive phrasing.\n"
+        "- If sharing content, pick one relevant thing only.\n"
+        f"- Heartbeat cadence baseline: every {interval_hours} hour(s).\n"
+    )
+
+
+async def _sync_proactive_heartbeat(
+    *,
+    runtime: Any,
+    customer_id: str,
+    directive_text: str,
+) -> dict[str, Any]:
+    cid = str(customer_id or "").strip()
+    if not cid:
+        return {"ok": False, "reason": "missing_customer_id"}
+
+    routine_id = _proactive_heartbeat_routine_id(cid)
+    wants_proactive = _directive_enables_proactive_mode(directive_text)
+    default_hours = int(getattr(runtime, "_proactive_heartbeat_default_hours", 3))
+    interval_hours = _extract_heartbeat_interval_hours(
+        directive_text,
+        default_hours=default_hours,
+    )
+    routine_name = "Proactive Heartbeat"
+
+    if not wants_proactive:
+        response = await runtime._request_with_backoff(
+            "DELETE",
+            f"/internal/scheduler/routine/{routine_id}",
+            params={"customer_id": cid},
+            timeout=8.0,
+            retries=1,
+        )
+        if response.status_code != 200:
+            return {
+                "ok": False,
+                "enabled": False,
+                "routine_id": routine_id,
+                "reason": f"heartbeat_disable_failed_http_{response.status_code}",
+            }
+        payload = response.json() if response.content else {}
+        return {
+            "ok": True,
+            "enabled": False,
+            "routine_id": routine_id,
+            "removed": bool(payload.get("ok", False)),
+            "interval_hours": interval_hours,
+        }
+
+    create = await runtime._request_with_backoff(
+        "POST",
+        "/internal/scheduler/routine",
+        json_body={
+            "id": routine_id,
+            "name": routine_name,
+            "schedule": f"0 */{interval_hours} * * *",
+            "is_cron": True,
+            "enabled": True,
+            "payload": {
+                "customer_id": cid,
+                "notify_user": True,
+                "proactive_heartbeat": True,
+                "heartbeat_interval_hours": interval_hours,
+                "message": _build_proactive_heartbeat_prompt(interval_hours),
+            },
+        },
+        timeout=10.0,
+        retries=1,
+    )
+    if create.status_code != 200:
+        return {
+            "ok": False,
+            "enabled": True,
+            "routine_id": routine_id,
+            "interval_hours": interval_hours,
+            "reason": f"heartbeat_enable_failed_http_{create.status_code}",
+        }
+    result = create.json() if create.content else {}
+    return {
+        "ok": True,
+        "enabled": True,
+        "routine_id": str(result.get("id", routine_id)).strip() or routine_id,
+        "name": routine_name,
+        "interval_hours": interval_hours,
+        "schedule": f"0 */{interval_hours} * * *",
+    }
+
+
 def register_runtime_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def memory_search(query: str, customer_id: str) -> Any:
@@ -414,7 +560,14 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         )
         if r.status_code != 200:
             return {"error": f"directive_set failed: {r.text}"}
-        return r.json()
+        payload = r.json()
+        heartbeat = await _sync_proactive_heartbeat(
+            runtime=runtime,
+            customer_id=customer_id,
+            directive_text=directive,
+        )
+        payload["proactive_heartbeat"] = heartbeat
+        return payload
 
     @tool
     async def directive_clear(customer_id: str) -> Any:
@@ -427,7 +580,14 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         )
         if r.status_code != 200:
             return {"error": f"directive_clear failed: {r.text}"}
-        return r.json()
+        payload = r.json()
+        heartbeat = await _sync_proactive_heartbeat(
+            runtime=runtime,
+            customer_id=customer_id,
+            directive_text="disable proactive mode",
+        )
+        payload["proactive_heartbeat"] = heartbeat
+        return payload
 
     @tool
     async def time_profile_get(customer_id: str) -> Any:
@@ -1041,6 +1201,34 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return r.json()
 
     @tool
+    async def action_note(
+        target_action_name: str,
+        note: str,
+        customer_id: str,
+        target_call_id: str | None = None,
+    ) -> Any:
+        """
+        Record pre-action reasoning for a potentially side-effecting action.
+
+        Use this right before external actions or external schedule creation.
+        Keep it as plain-language reasoning about what will happen next.
+        """
+        action = str(target_action_name or "").strip()
+        note_text = str(note or "").strip()
+        if not action:
+            return {"error": "action_note failed: target_action_name is required"}
+        if not note_text:
+            return {"error": "action_note failed: note is required"}
+        return {
+            "ok": True,
+            "target_action_name": action,
+            "target_call_id": str(target_call_id or "").strip() or None,
+            "note": note_text[:2000],
+            "customer_id": str(customer_id or "").strip(),
+            "recorded": True,
+        }
+
+    @tool
     async def guardrail_execute_approved_action(approval_id: str, customer_id: str) -> Any:
         """Execute a previously approved external-impact action exactly once."""
         aid = str(approval_id or "").strip()
@@ -1105,6 +1293,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         "routine_list": routine_list,
         "routine_delete": routine_delete,
         "automation_delete": automation_delete,
+        "action_note": action_note,
         "guardrail_execute_approved_action": guardrail_execute_approved_action,
         "server_time": server_time,
     }

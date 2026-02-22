@@ -130,6 +130,8 @@ def main() -> None:
             app_url=f"http://127.0.0.1:{settings.port}",
             openrouter_api_key=openrouter_api_key,
             model_name=settings.llm_model,
+            wake_classifier_model_name=settings.wake_classifier_model,
+            guardrail_classifier_model_name=settings.guardrail_classifier_model,
             checkpoint_db_path=settings.agent_checkpoint_db_path,
             recursion_limit=settings.agent_recursion_limit,
             context_events=context_events,
@@ -140,6 +142,7 @@ def main() -> None:
             context_recent_tokens=settings.agent_context_recent_tokens,
             context_rollup_tokens=settings.agent_context_rollup_tokens,
             context_compaction_source_tokens=settings.agent_context_compaction_source_tokens,
+            proactive_heartbeat_default_hours=settings.proactive_heartbeat_default_hours,
         )
     else:
         print(

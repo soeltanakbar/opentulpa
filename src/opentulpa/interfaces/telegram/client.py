@@ -136,6 +136,19 @@ class TelegramClient:
         data = await self._post("editMessageText", payload)
         return bool(data)
 
+    async def edit_message_reply_markup(
+        self,
+        *,
+        chat_id: int | str,
+        message_id: int,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> bool:
+        payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id}
+        if isinstance(reply_markup, dict):
+            payload["reply_markup"] = reply_markup
+        data = await self._post("editMessageReplyMarkup", payload)
+        return bool(data)
+
     async def answer_callback_query(
         self,
         *,
@@ -152,6 +165,16 @@ class TelegramClient:
         if not payload["callback_query_id"]:
             return False
         data = await self._post("answerCallbackQuery", payload)
+        return bool(data)
+
+    async def send_chat_action(
+        self,
+        *,
+        chat_id: int | str,
+        action: str = "typing",
+    ) -> bool:
+        safe_action = str(action or "").strip() or "typing"
+        data = await self._post("sendChatAction", {"chat_id": chat_id, "action": safe_action})
         return bool(data)
 
     async def upsert_stream_message(

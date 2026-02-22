@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +41,7 @@ from opentulpa.core.config import get_settings
 from opentulpa.integrations.slack_client import grant_slack_write_consent, has_slack_write_consent
 from opentulpa.interfaces.telegram.chat_service import TelegramChatService
 from opentulpa.interfaces.telegram.client import TelegramClient
+from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
 from opentulpa.memory.service import MemoryService
 from opentulpa.scheduler.service import SchedulerService
 from opentulpa.skills.service import SkillStoreService
@@ -258,6 +259,8 @@ def create_app(
                     text=item["text"],
                     parse_mode="HTML",
                 )
+                with suppress(Exception):
+                    get_telegram_chat().touch_assistant_message(int(item["chat_id"]))
             return
 
         if wake_type == "task_event":
@@ -384,12 +387,21 @@ def create_app(
                 payload=queue_payload,
             )
             return
+        sent_any = False
         for item in replies:
+            safe_text = str(item.get("text", "")).strip()
+            if not safe_text or safe_text == NO_NOTIFY_TOKEN:
+                continue
             await get_telegram_client().send_message(
                 chat_id=item["chat_id"],
-                text=item["text"],
+                text=safe_text,
                 parse_mode="HTML",
             )
+            with suppress(Exception):
+                get_telegram_chat().touch_assistant_message(int(item["chat_id"]))
+            sent_any = True
+        if not sent_any:
+            return
 
     wake_queue_service = WakeQueueService(
         db_path=PROJECT_ROOT / ".opentulpa" / "wake_events.db",

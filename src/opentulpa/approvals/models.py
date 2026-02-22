@@ -26,6 +26,7 @@ class ActionIntent:
     summary: str
     reason: str
     confidence: float
+    llm_gate: GateAction | None = None
     llm_uncertain: bool = False
 
 

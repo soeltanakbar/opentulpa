@@ -21,5 +21,6 @@ class AgentState(TypedDict, total=False):
     guardrail_has_executable_calls: bool
     guardrail_allowed_call_ids: list[str]
     guardrail_feedback_messages: list[AnyMessage]
+    action_notes_by_action: dict[str, str]
     tool_error_count: int
     last_tool_error: str

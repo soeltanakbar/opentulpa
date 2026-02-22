@@ -8,6 +8,7 @@ import logging
 import time
 from collections.abc import Callable
 from contextlib import suppress
+from datetime import datetime, timezone
 from typing import Any
 
 from opentulpa.agent.runtime import MergedInputSuppressedError, STREAM_WAIT_SIGNAL
@@ -16,6 +17,7 @@ from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.interfaces.telegram.constants import DEBUG_LOG_PATH, LOW_SIGNAL_REPLIES
 
 logger = logging.getLogger(__name__)
+NO_NOTIFY_TOKEN = "__NO_NOTIFY__"
 
 
 def normalize_reply_text(text: str) -> str:
@@ -350,17 +352,79 @@ async def relay_event_via_main_agent(
         return []
     if agent_runtime is None:
         raise RuntimeError("Agent runtime unavailable for wake relay")
-
-    instruction = (
-        "System update: a background event occurred.\n"
-        "Respond with concise plain-language status, what happened, and next action.\n"
-        f"- event: {event_label}\n"
-        f"- payload: {json.dumps(payload, ensure_ascii=False)[:4000]}"
-    )
+    routine_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    routine_message = str(routine_payload.get("message", "")).strip()
+    routine_name = str(payload.get("routine_name", "")).strip()
+    proactive_heartbeat = bool(routine_payload.get("proactive_heartbeat", False))
+    now_utc = datetime.now(timezone.utc)
     replies: list[dict[str, Any]] = []
     for slot in slots:
         chat_id = int(slot["chat_id"])
         chat_key = str(chat_id)
+        last_user_at = str(slot.get("last_user_message_at", "")).strip()
+        last_assistant_at = str(slot.get("last_assistant_message_at", "")).strip()
+        user_idle_hours = "unknown"
+        assistant_idle_hours = "unknown"
+        if last_user_at:
+            with suppress(Exception):
+                parsed = datetime.fromisoformat(last_user_at.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                user_idle_hours = f"{max(0.0, (now_utc - parsed).total_seconds() / 3600.0):.2f}"
+        if last_assistant_at:
+            with suppress(Exception):
+                parsed = datetime.fromisoformat(last_assistant_at.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                assistant_idle_hours = f"{max(0.0, (now_utc - parsed).total_seconds() / 3600.0):.2f}"
+
+        if (
+            str(event_label).startswith("routine/")
+            and proactive_heartbeat
+            and hasattr(agent_runtime, "classify_wake_event")
+        ):
+            precheck_payload = {
+                "event_label": event_label,
+                "routine_name": routine_name,
+                "routine_payload": routine_payload,
+                "last_user_message_at_utc": last_user_at or "unknown",
+                "last_assistant_message_at_utc": last_assistant_at or "unknown",
+                "user_idle_hours": user_idle_hours,
+                "assistant_idle_hours": assistant_idle_hours,
+            }
+            decision = {"notify_user": True}
+            with suppress(Exception):
+                decision = await agent_runtime.classify_wake_event(
+                    customer_id=customer_id,
+                    event_label="routine/heartbeat_precheck",
+                    payload=precheck_payload,
+                )
+            if not bool(decision.get("notify_user", False)):
+                continue
+
+        if str(event_label).startswith("routine/"):
+            instruction = (
+                "System update: a scheduled routine woke you.\n"
+                "Decide if the user should be messaged right now.\n"
+                f"- event: {event_label}\n"
+                f"- routine_name: {routine_name or 'unnamed'}\n"
+                f"- routine_instruction: {routine_message[:3000] or '(none)'}\n"
+                f"- last_user_message_at_utc: {last_user_at or 'unknown'}\n"
+                f"- user_idle_hours: {user_idle_hours}\n"
+                f"- last_assistant_message_at_utc: {last_assistant_at or 'unknown'}\n"
+                f"- assistant_idle_hours: {assistant_idle_hours}\n"
+                f"- now_utc: {now_utc.isoformat()}\n"
+                f"- payload: {json.dumps(payload, ensure_ascii=False)[:4000]}\n\n"
+                f"If you decide to skip messaging this run, reply exactly: {NO_NOTIFY_TOKEN}\n"
+                "If you decide to message, send one concise, natural message (no rigid status template)."
+            )
+        else:
+            instruction = (
+                "System update: a background event occurred.\n"
+                "Respond with concise plain-language status, what happened, and next action.\n"
+                f"- event: {event_label}\n"
+                f"- payload: {json.dumps(payload, ensure_ascii=False)[:4000]}"
+            )
 
         def _ensure_wake_thread_id(state: dict[str, Any], _chat_key: str = chat_key) -> str:
             sessions = state.get("sessions")
@@ -384,11 +448,15 @@ async def relay_event_via_main_agent(
                 customer_id=customer_id,
                 text=instruction,
                 include_pending_context=False,
+                recursion_limit_override=12 if proactive_heartbeat else None,
             )
-            if text and text.strip():
-                replies.append({"chat_id": chat_id, "text": text.strip()})
+            safe = str(text or "").strip()
+            if not safe:
+                continue
+            if safe == NO_NOTIFY_TOKEN:
+                replies.append({"chat_id": chat_id, "text": NO_NOTIFY_TOKEN})
+                continue
+            replies.append({"chat_id": chat_id, "text": safe})
         except Exception:
             continue
-    if not replies:
-        raise RuntimeError("Main agent did not produce a wake reply")
     return replies

@@ -53,6 +53,7 @@ def build_runtime_graph(runtime: Any):
         "routine_list": ("customer_id",),
         "routine_delete": ("routine_id", "customer_id"),
         "automation_delete": ("routine_id", "customer_id"),
+        "action_note": ("target_action_name", "note"),
         "guardrail_execute_approved_action": ("approval_id", "customer_id"),
     }
 
@@ -95,6 +96,15 @@ def build_runtime_graph(runtime: Any):
             "If you output a known alias ID, it will be expanded to full URL for the user. "
             "When you are unsure about prior user-specific facts/preferences/IDs because they are not in short-term context, "
             "call memory_search before asking the user to repeat themselves. "
+            "Credential/token recovery policy: before asking users for keys, secrets, tokens, client files, or auth codes, "
+            "first try memory_search and local-file lookup (tulpa_catalog/tulpa_read_file) for existing credentials. "
+            "For OAuth integrations, prefer refresh-token recovery first; if a refresh token exists, refresh and persist "
+            "updated token data, then retry the original task. "
+            "Only ask the user for a new auth code when refresh-token recovery is impossible "
+            "(missing/revoked refresh token or invalid client credentials). "
+            "Background/routine execution policy: for recoverable errors (missing file/dependency/credential format mismatch), "
+            "attempt a low-risk self-repair and retry before reporting failure. "
+            "Never repeatedly ask for credentials that were already found in memory or local files. "
             "When users ask to send an image from the web, use web_search to find candidate URLs, "
             "then call web_image_send (it validates URL content-type is image/* before sending). "
             "When a task needs real interactive browsing (dynamic pages, multi-step navigation, "
@@ -113,6 +123,15 @@ def build_runtime_graph(runtime: Any):
             "scheduling periodic polling jobs, and producing change summaries/alerts from API or web data. "
             "If a tool returns APPROVAL_PENDING with an approval_id, ask the user to approve it and then call "
             "guardrail_execute_approved_action with that approval_id. "
+            "Before any potentially side-effecting action (especially external posts/sends, terminal/browser mutations, "
+            "or routine_create for external automations), call action_note first with concise reasoning "
+            "about what you will do next. "
+            "The note should explain your planned action, likely tools, and expected external effects in plain language. "
+            "Approval model: instant external tasks require per-action approval, while scheduled external automations "
+            "must be approved at routine creation time and then run without per-run approval prompts. "
+            "Background scheduled runs are pre-authorized after schedule creation approval. "
+            "Never say an external action was sent/posted/executed until you have a successful tool result. "
+            "If approval is still pending or execution was blocked, state clearly that it did not run yet. "
             "For capability requests, avoid generic marketing copy. "
             "Use a consultative format: "
             "1) concise capability overview grounded in actual tools, "
@@ -334,6 +353,7 @@ def build_runtime_graph(runtime: Any):
                     "routine_delete",
                     "automation_delete",
                     "browser_use_run",
+                    "action_note",
                     "guardrail_execute_approved_action",
                 }:
                     args = {**args, "customer_id": customer_id}
@@ -397,17 +417,104 @@ def build_runtime_graph(runtime: Any):
         thread_id = str(state.get("thread_id", "")).strip()
         allowed_call_ids: list[str] = []
         gate_messages: list[ToolMessage] = []
+        no_note_required_actions = {
+            "memory_search",
+            "memory_add",
+            "skill_list",
+            "skill_get",
+            "skill_upsert",
+            "skill_delete",
+            "directive_get",
+            "directive_set",
+            "directive_clear",
+            "time_profile_get",
+            "time_profile_set",
+            "web_search",
+            "fetch_link_content",
+            "uploaded_file_search",
+            "uploaded_file_get",
+            "uploaded_file_analyze",
+            "browser_use_task_get",
+            "routine_list",
+            "routine_delete",
+            "automation_delete",
+            "task_status",
+            "task_events",
+            "task_artifacts",
+            "tulpa_read_file",
+            "tulpa_catalog",
+            "server_time",
+            "guardrail_execute_approved_action",
+        }
+        retained_notes_raw = state.get("action_notes_by_action", {})
+        retained_notes: dict[str, str] = {}
+        if isinstance(retained_notes_raw, dict):
+            for key, value in retained_notes_raw.items():
+                k = str(key or "").strip()
+                v = str(value or "").strip()[:2000]
+                if k and v:
+                    retained_notes[k] = v
+
+        def _requires_action_note(action_name: str) -> bool:
+            safe = str(action_name or "").strip()
+            if not safe or safe == "action_note":
+                return False
+            return safe not in no_note_required_actions
+
+        note_by_call_id: dict[str, str] = {}
+        notes_by_action: dict[str, list[str]] = {}
         for call in last.tool_calls:
             call_name = str(call.get("name", "")).strip()
             call_id = str(call.get("id", "")).strip()
+            if call_name != "action_note":
+                continue
             args = call.get("args", {})
             safe_args = args if isinstance(args, dict) else {}
+            target_action_name = str(safe_args.get("target_action_name", "")).strip()
+            note_text = str(safe_args.get("note", "")).strip()[:2000]
+            target_call_id = str(safe_args.get("target_call_id", "")).strip()
+            if target_action_name and note_text:
+                if target_call_id:
+                    note_by_call_id[target_call_id] = note_text
+                action_notes = notes_by_action.get(target_action_name) or []
+                action_notes.append(note_text)
+                notes_by_action[target_action_name] = action_notes
+                retained_notes[target_action_name] = note_text
+            if call_id:
+                allowed_call_ids.append(call_id)
+
+        for call in last.tool_calls:
+            call_name = str(call.get("name", "")).strip()
+            call_id = str(call.get("id", "")).strip()
+            if call_name == "action_note":
+                continue
+            args = call.get("args", {})
+            safe_args = args if isinstance(args, dict) else {}
+            action_note = note_by_call_id.get(call_id)
+            if not action_note:
+                action_notes = notes_by_action.get(call_name) or []
+                action_note = action_notes[-1] if action_notes else None
+            if not action_note:
+                action_note = retained_notes.get(call_name)
+            if _requires_action_note(call_name) and not action_note:
+                gate_messages.append(
+                    ToolMessage(
+                        content=(
+                            "ACTION_NOTE_REQUIRED: Before this action, call action_note with "
+                            f"target_action_name={call_name} and a concise reasoning note describing "
+                            "what you are about to do, likely tools, and expected external effects."
+                        ),
+                        tool_call_id=call_id,
+                    )
+                )
+                continue
             try:
                 result = await runtime.evaluate_tool_guardrail(
                     customer_id=customer_id,
                     thread_id=thread_id,
                     action_name=call_name,
                     action_args=safe_args,
+                    action_note=action_note,
                 )
             except Exception as exc:
                 result = {
@@ -453,6 +560,8 @@ def build_runtime_graph(runtime: Any):
             "guardrail_allowed_call_ids": allowed_call_ids,
             "guardrail_has_executable_calls": bool(allowed_call_ids),
         }
+        if retained_notes:
+            update["action_notes_by_action"] = retained_notes
         if gate_messages:
             if allowed_call_ids:
                 update["guardrail_feedback_messages"] = gate_messages

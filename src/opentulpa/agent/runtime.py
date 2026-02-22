@@ -115,32 +115,46 @@ class OpenTulpaLangGraphRuntime:
         app_url: str,
         openrouter_api_key: str,
         model_name: str,
+        wake_classifier_model_name: str | None = None,
+        guardrail_classifier_model_name: str | None = None,
         checkpoint_db_path: str,
         recursion_limit: int = 30,
         context_events: EventContextService | None = None,
         customer_profile_service: CustomerProfileService | None = None,
         thread_rollup_service: ThreadRollupService | None = None,
         link_alias_service: LinkAliasService | None = None,
-        context_token_limit: int = 40000,
+        context_token_limit: int = 30000,
         context_rollup_tokens: int = 5000,
-        context_recent_tokens: int = 20000,
+        context_recent_tokens: int = 10000,
         context_compaction_source_tokens: int = 100000,
         input_debounce_seconds: float = 0.65,
+        proactive_heartbeat_default_hours: int = 3,
     ) -> None:
         self.app_url = app_url.rstrip("/")
         self.openrouter_api_key = openrouter_api_key
         self.model_name = _normalize_model_name(model_name)
+        self._wake_classifier_model_name = (
+            _normalize_model_name(wake_classifier_model_name)
+            if str(wake_classifier_model_name or "").strip()
+            else self.model_name
+        )
+        guardrail_model = (
+            str(guardrail_classifier_model_name).strip()
+            if str(guardrail_classifier_model_name or "").strip()
+            else "minimax/minimax-m2.5"
+        )
+        self._guardrail_classifier_model_name = _normalize_model_name(guardrail_model)
         self.checkpoint_db_path = checkpoint_db_path
         self.recursion_limit = recursion_limit
         self._context_events = context_events
         self._customer_profile_service = customer_profile_service
         self._thread_rollup_service = thread_rollup_service
         self._link_alias_service = link_alias_service
-        self._context_token_limit = max(10000, int(context_token_limit))
-        self._context_short_term_high_tokens = max(2000, int(context_token_limit))
+        self._context_token_limit = max(10000, min(30000, int(context_token_limit)))
+        self._context_short_term_high_tokens = self._context_token_limit
         self._context_short_term_low_tokens = min(
-            max(1000, int(context_recent_tokens)),
-            max(1000, self._context_short_term_high_tokens - 500),
+            max(10000, int(context_recent_tokens)),
+            max(10000, self._context_short_term_high_tokens - 500),
         )
         self._context_rollup_tokens = min(
             max(500, int(context_rollup_tokens)),
@@ -153,6 +167,7 @@ class OpenTulpaLangGraphRuntime:
             int(context_compaction_source_tokens),
         )
         self._input_debounce_seconds = max(0.0, min(float(input_debounce_seconds), 3.0))
+        self._proactive_heartbeat_default_hours = max(1, min(int(proactive_heartbeat_default_hours), 24))
 
         self._model = init_chat_model(
             self.model_name,
@@ -161,6 +176,45 @@ class OpenTulpaLangGraphRuntime:
             base_url="https://openrouter.ai/api/v1",
             temperature=0,
         )
+        if self._wake_classifier_model_name == self.model_name:
+            self._wake_classifier_model = self._model
+        else:
+            try:
+                self._wake_classifier_model = init_chat_model(
+                    self._wake_classifier_model_name,
+                    model_provider="openai",
+                    api_key=openrouter_api_key,
+                    base_url="https://openrouter.ai/api/v1",
+                    temperature=0,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to initialize wake classifier model '%s'; falling back to main model '%s'.",
+                    self._wake_classifier_model_name,
+                    self.model_name,
+                )
+                self._wake_classifier_model = self._model
+        if self._guardrail_classifier_model_name == self.model_name:
+            self._guardrail_classifier_model = self._model
+        elif self._guardrail_classifier_model_name == self._wake_classifier_model_name:
+            self._guardrail_classifier_model = self._wake_classifier_model
+        else:
+            try:
+                self._guardrail_classifier_model = init_chat_model(
+                    self._guardrail_classifier_model_name,
+                    model_provider="openai",
+                    api_key=openrouter_api_key,
+                    base_url="https://openrouter.ai/api/v1",
+                    temperature=0,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to initialize guardrail classifier model '%s'; "
+                    "falling back to main model '%s'.",
+                    self._guardrail_classifier_model_name,
+                    self.model_name,
+                )
+                self._guardrail_classifier_model = self._model
 
         self._checkpointer_cm: Any | None = None
         self._checkpointer: Any | None = None
@@ -1095,7 +1149,7 @@ class OpenTulpaLangGraphRuntime:
     ) -> dict[str, Any]:
         """Let the model decide whether a wake event should interrupt the user now."""
         try:
-            response = await self._model.ainvoke(
+            response = await self._wake_classifier_model.ainvoke(
                 [
                     SystemMessage(
                         content=(
@@ -1128,6 +1182,7 @@ class OpenTulpaLangGraphRuntime:
         *,
         action_name: str,
         action_args: dict[str, Any],
+        action_note: str | None = None,
     ) -> dict[str, Any]:
         """
         Isolated, compact classifier for approval guardrails.
@@ -1135,6 +1190,7 @@ class OpenTulpaLangGraphRuntime:
         Returns strict JSON-like payload:
         {
           "ok": bool,
+          "gate": "allow|require_approval|deny",
           "impact_type": "read|write|purchase|costly",
           "recipient_scope": "self|external|unknown",
           "confidence": float,
@@ -1167,22 +1223,29 @@ class OpenTulpaLangGraphRuntime:
                 safe_args[key_text] = str(value)[:200]
 
         try:
-            response = await self._model.ainvoke(
+            response = await self._guardrail_classifier_model.ainvoke(
                 [
                     SystemMessage(
                         content=(
                             "Classify action safety intent for an approval gate.\n"
                             "Return strict JSON object only with keys:\n"
-                            "ok (bool), impact_type (read|write|purchase|costly),\n"
+                            "ok (bool), gate (allow|require_approval|deny),\n"
+                            "impact_type (read|write|purchase|costly),\n"
                             "recipient_scope (self|external|unknown),\n"
                             "confidence (0..1), reason (string <= 160 chars).\n"
+                            "Rules:\n"
+                            "- Use allow for internal/self/read-only actions without external side effects.\n"
+                            "- Use require_approval for external or unclear side effects.\n"
+                            "- Use deny only for actions that should never run as requested.\n"
+                            "- Treat action_note as agent reasoning about next planned action and likely tool path.\n"
                             "Do not include any extra keys or markdown."
                         )
                     ),
                     HumanMessage(
                         content=(
                             f"action_name={safe_name}\n"
-                            f"action_args={json.dumps(safe_args, ensure_ascii=False)[:3000]}"
+                            f"action_args={json.dumps(safe_args, ensure_ascii=False)[:3000]}\n"
+                            f"action_note={str(action_note or '').strip()[:2000]}"
                         )
                     ),
                 ]
@@ -1190,8 +1253,11 @@ class OpenTulpaLangGraphRuntime:
             raw = response.content if hasattr(response, "content") else str(response)
             raw_text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
             parsed = self._extract_json_object(raw_text) or {}
+            gate = str(parsed.get("gate", "")).strip().lower()
             impact_type = str(parsed.get("impact_type", "")).strip().lower()
             recipient_scope = str(parsed.get("recipient_scope", "")).strip().lower()
+            if gate not in {"allow", "require_approval", "deny"}:
+                return {"ok": False, "error": "invalid_gate"}
             if impact_type not in {"read", "write", "purchase", "costly"}:
                 return {"ok": False, "error": "invalid_impact_type"}
             if recipient_scope not in {"self", "external", "unknown"}:
@@ -1202,6 +1268,7 @@ class OpenTulpaLangGraphRuntime:
                 confidence = 0.0
             return {
                 "ok": True,
+                "gate": gate,
                 "impact_type": impact_type,
                 "recipient_scope": recipient_scope,
                 "confidence": max(0.0, min(confidence, 1.0)),
@@ -1217,6 +1284,7 @@ class OpenTulpaLangGraphRuntime:
         thread_id: str,
         action_name: str,
         action_args: dict[str, Any],
+        action_note: str | None = None,
     ) -> dict[str, Any]:
         """Call upstream approval broker to evaluate a tool call at action time."""
         try:
@@ -1228,6 +1296,7 @@ class OpenTulpaLangGraphRuntime:
                     "thread_id": thread_id,
                     "action_name": action_name,
                     "action_args": action_args if isinstance(action_args, dict) else {},
+                    "action_note": str(action_note or "").strip()[:2000],
                 },
                 timeout=12.0,
                 retries=1,

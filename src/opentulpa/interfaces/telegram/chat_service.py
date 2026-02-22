@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 from opentulpa.context.file_vault import FileVaultService
@@ -274,11 +275,14 @@ async def handle_telegram_text(
             slot = {}
         thread_id = str(slot.get("thread_id", "")).strip() or f"chat-{ctx.chat_id}"
         customer_id = str(slot.get("customer_id", "")).strip() or f"telegram_{ctx.user_id}"
+        now_utc_iso = datetime.now(timezone.utc).isoformat()
         sessions[str(ctx.chat_id)] = {
             "user_id": ctx.user_id,
             "customer_id": customer_id,
             "thread_id": thread_id,
             "wake_thread_id": slot.get("wake_thread_id"),
+            "last_user_message_at": now_utc_iso,
+            "last_assistant_message_at": slot.get("last_assistant_message_at"),
         }
         state["sessions"] = sessions
         return thread_id, customer_id
@@ -355,6 +359,7 @@ async def handle_telegram_text(
             )
             return _format_agent_error_for_user(exc)
         if final:
+            STATE_STORE.touch_assistant_message(ctx.chat_id)
             return None
         debug_log(
             hypothesis_id="H4",
@@ -400,6 +405,9 @@ class TelegramChatService:
 
     def get_session_slot(self, chat_id: int) -> dict[str, Any] | None:
         return get_session_slot_for_chat_id(chat_id)
+
+    def touch_assistant_message(self, chat_id: int) -> None:
+        STATE_STORE.touch_assistant_message(chat_id)
 
     async def relay_task_event(
         self,

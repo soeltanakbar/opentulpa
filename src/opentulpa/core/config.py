@@ -29,13 +29,13 @@ class Settings(BaseSettings):
         description="Maximum LangGraph steps per turn.",
     )
     agent_context_token_limit: int = Field(
-        default=40000,
+        default=30000,
         ge=10000,
         le=1000000,
         description="Short-term high-watermark (estimated tokens) before thread context compaction.",
     )
     agent_context_recent_tokens: int = Field(
-        default=20000,
+        default=10000,
         ge=1000,
         le=1000000,
         description="Short-term low-watermark target (estimated tokens) after compaction.",
@@ -110,6 +110,26 @@ class Settings(BaseSettings):
     llm_model: str = Field(
         default="gemini-3-flash-preview",
         description="Model id: for OpenRouter use 'google/<this>'; for mem0 Gemini use as-is.",
+    )
+    wake_classifier_model: str | None = Field(
+        default=None,
+        description=(
+            "Optional cheaper model for wake/heartbeat notify decisions. "
+            "If unset, uses LLM_MODEL."
+        ),
+    )
+    guardrail_classifier_model: str = Field(
+        default="minimax/minimax-m2.5",
+        description=(
+            "Model used by guardrail intent classification for approval decisions. "
+            "Defaults to minimax/minimax-m2.5."
+        ),
+    )
+    proactive_heartbeat_default_hours: int = Field(
+        default=3,
+        ge=1,
+        le=24,
+        description="Default heartbeat interval (hours) when proactive mode auto-enables.",
     )
     openrouter_embedding_model: str = Field(
         default="openai/text-embedding-3-small",

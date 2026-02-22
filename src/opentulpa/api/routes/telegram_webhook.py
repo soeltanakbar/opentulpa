@@ -24,7 +24,11 @@ logger = logging.getLogger(__name__)
 def _parse_approval_callback_data(data: str) -> tuple[str, str] | None:
     raw = str(data or "").strip()
     # Format: approval:<approval_id>:approve|deny
-    match = re.fullmatch(r"approval:([a-z0-9_-]{6,40}):(approve|deny)", raw, re.IGNORECASE)
+    match = re.fullmatch(
+        r"approval:([a-z0-9_-]{6,40}):(approve|deny)",
+        raw,
+        re.IGNORECASE,
+    )
     if not match:
         return None
     return match.group(1), match.group(2).lower()
@@ -32,8 +36,12 @@ def _parse_approval_callback_data(data: str) -> tuple[str, str] | None:
 
 def _parse_text_token_decision(text: str) -> tuple[str, str] | None:
     raw = str(text or "").strip()
-    # Formats: /approve apr_xxx | approve apr_xxx | /deny apr_xxx | deny apr_xxx
-    match = re.fullmatch(r"/?(approve|deny)\s+([a-z0-9_-]{6,40})", raw, re.IGNORECASE)
+    # Formats: /approve apr_xxx | /deny apr_xxx
+    match = re.fullmatch(
+        r"/?(approve|deny)\s+([a-z0-9_-]{6,40})",
+        raw,
+        re.IGNORECASE,
+    )
     if not match:
         return None
     return match.group(2), match.group(1).lower()
@@ -170,30 +178,17 @@ async def _execute_approved_action_and_summarize(
     return "Task completed."
 
 
-async def _animate_loader_until_done(
+async def _emit_typing_until_done(
     *,
     client: Any,
     chat_id: int,
-    state: dict[str, Any],
     stop_event: asyncio.Event,
 ) -> None:
-    sequence = ("...", "..", ".", "..", "...")
-    idx = 0
     while not stop_event.is_set():
-        marker = sequence[idx % len(sequence)]
-        idx += 1
-        state["message_id"] = (
-            await client.upsert_stream_message(
-                chat_id=chat_id,
-                text=marker,
-                message_id=state.get("message_id"),
-                parse_mode=None,
-                allow_fallback_send=False,
-            )
-            or state.get("message_id")
-        )
+        with suppress(Exception):
+            await client.send_chat_action(chat_id=chat_id, action="typing")
         with suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(stop_event.wait(), timeout=0.22)
+            await asyncio.wait_for(stop_event.wait(), timeout=4.0)
 
 
 async def _run_post_approval_execution_flow(
@@ -212,27 +207,17 @@ async def _run_post_approval_execution_flow(
     client = get_telegram_client()
     with suppress(Exception):
         if isinstance(approval_message_id, int):
-            await client.edit_message_text(
+            await client.edit_message_reply_markup(
                 chat_id=chat_id,
                 message_id=approval_message_id,
-                text="Working on the task.",
-                parse_mode="HTML",
                 reply_markup={"inline_keyboard": []},
             )
-        else:
-            await client.send_message(
-                chat_id=chat_id,
-                text="Working on the task.",
-                parse_mode="HTML",
-            )
 
-    loader_state: dict[str, Any] = {"message_id": None}
     loader_stop = asyncio.Event()
     loader_task = asyncio.create_task(
-        _animate_loader_until_done(
+        _emit_typing_until_done(
             client=client,
             chat_id=chat_id,
-            state=loader_state,
             stop_event=loader_stop,
         )
     )
@@ -262,16 +247,6 @@ async def _run_post_approval_execution_flow(
         with suppress(Exception):
             await loader_task
 
-    message_id = loader_state.get("message_id")
-    if isinstance(message_id, int):
-        with suppress(Exception):
-            await client.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=final_outcome,
-                parse_mode="HTML",
-            )
-        return
     with suppress(Exception):
         await client.send_message(chat_id=chat_id, text=final_outcome, parse_mode="HTML")
 
@@ -308,10 +283,10 @@ def register_telegram_webhook_routes(
         )
         parsed_callback = _parse_approval_callback_data(callback_data or "")
         if parsed_callback and callback_id and callback_user_id and callback_chat_id:
-            approval_id, decision = parsed_callback
+            approval_id, requested_decision = parsed_callback
             result = await decide_approval_and_maybe_wake(
                 approval_id=approval_id,
-                decision=decision,
+                decision=requested_decision,
                 actor_interface="telegram",
                 actor_id=str(callback_user_id),
                 enqueue_wake=False,
@@ -348,7 +323,9 @@ def register_telegram_webhook_routes(
             elif denied:
                 ack_text = "Action denied."
             else:
-                ack_text = f"Approval {decision} failed: {result.get('reason', 'not_allowed')}"
+                ack_text = (
+                    f"Approval {requested_decision} failed: {result.get('reason', 'not_allowed')}"
+                )
             with suppress(Exception):
                 await get_telegram_client().answer_callback_query(
                     callback_query_id=callback_id,
@@ -401,10 +378,10 @@ def register_telegram_webhook_routes(
         _, user_id, text = parse_telegram_update(body)
         token_decision = _parse_text_token_decision(text or "")
         if token_decision and chat_id is not None and user_id is not None:
-            approval_id, decision = token_decision
+            approval_id, requested_decision = token_decision
             result = await decide_approval_and_maybe_wake(
                 approval_id=approval_id,
-                decision=decision,
+                decision=requested_decision,
                 actor_interface="telegram",
                 actor_id=str(user_id),
                 enqueue_wake=False,
@@ -460,7 +437,10 @@ def register_telegram_webhook_routes(
                 reply_text = (
                     "Action denied."
                     if bool(result.get("ok")) and str(result.get("status", "")).strip() == "denied"
-                    else f"Approval {decision} failed: {result.get('reason', 'not_allowed')}"
+                    else (
+                        f"Approval {requested_decision} failed: "
+                        f"{result.get('reason', 'not_allowed')}"
+                    )
                 )
                 with suppress(Exception):
                     await get_telegram_client().send_message(
@@ -495,3 +475,5 @@ def register_telegram_webhook_routes(
                     text=reply,
                     parse_mode="HTML",
                 )
+            with suppress(Exception):
+                get_telegram_chat().touch_assistant_message(int(chat_id))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import suppress
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -65,6 +66,8 @@ class TelegramStateStore:
                             "thread_id": slot.get("thread_id"),
                             "wake_thread_id": slot.get("wake_thread_id"),
                             "customer_id": slot.get("customer_id"),
+                            "last_user_message_at": slot.get("last_user_message_at"),
+                            "last_assistant_message_at": slot.get("last_assistant_message_at"),
                         }
                     )
         if customer_id.startswith("telegram_"):
@@ -81,6 +84,8 @@ class TelegramStateStore:
                                     "thread_id": slot.get("thread_id"),
                                     "wake_thread_id": slot.get("wake_thread_id"),
                                     "customer_id": slot.get("customer_id"),
+                                    "last_user_message_at": slot.get("last_user_message_at"),
+                                    "last_assistant_message_at": slot.get("last_assistant_message_at"),
                                 }
                             )
         return slots
@@ -98,4 +103,23 @@ class TelegramStateStore:
             "thread_id": slot.get("thread_id"),
             "wake_thread_id": slot.get("wake_thread_id"),
             "customer_id": slot.get("customer_id"),
+            "last_user_message_at": slot.get("last_user_message_at"),
+            "last_assistant_message_at": slot.get("last_assistant_message_at"),
         }
+
+    def touch_assistant_message(self, chat_id: int | str) -> None:
+        now_utc_iso = datetime.now(timezone.utc).isoformat()
+        key = str(chat_id)
+
+        def _touch(state: dict[str, Any]) -> None:
+            sessions = state.get("sessions")
+            if not isinstance(sessions, dict):
+                sessions = {}
+            slot = sessions.get(key)
+            if not isinstance(slot, dict):
+                return
+            slot["last_assistant_message_at"] = now_utc_iso
+            sessions[key] = slot
+            state["sessions"] = sessions
+
+        self.update(_touch)
