@@ -1,6 +1,7 @@
 """API route registrars."""
 
 from opentulpa.api.routes.approvals import register_approval_routes
+from opentulpa.api.routes.chat import register_chat_routes
 from opentulpa.api.routes.files import register_file_routes
 from opentulpa.api.routes.health import register_health_routes
 from opentulpa.api.routes.memory import register_memory_routes
@@ -15,6 +16,7 @@ from opentulpa.api.routes.wake_search import register_wake_and_search_routes
 
 __all__ = [
     "register_approval_routes",
+    "register_chat_routes",
     "register_file_routes",
     "register_health_routes",
     "register_memory_routes",

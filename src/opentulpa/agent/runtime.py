@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
@@ -78,10 +79,15 @@ from opentulpa.context.customer_profiles import CustomerProfileService
 from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.context.thread_rollups import ThreadRollupService
+from opentulpa.core.ids import new_short_id
 
 logger = logging.getLogger(__name__)
 _LINK_ID_TOKEN_RE = re.compile(r"\blink_[A-Za-z0-9]{4,12}\b")
 STREAM_WAIT_SIGNAL = "__TULPA_STREAM_WAIT__"
+STREAM_EMPTY_REPLY_FALLBACK = (
+    "I couldn't produce a visible user-facing reply for that step. "
+    "Please retry, and I will continue from the latest state."
+)
 
 APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS: set[str] = {
     "memory_search",
@@ -123,12 +129,14 @@ class OpenTulpaLangGraphRuntime:
         customer_profile_service: CustomerProfileService | None = None,
         thread_rollup_service: ThreadRollupService | None = None,
         link_alias_service: LinkAliasService | None = None,
-        context_token_limit: int = 30000,
-        context_rollup_tokens: int = 5000,
-        context_recent_tokens: int = 10000,
+        context_token_limit: int = 12000,
+        context_rollup_tokens: int = 2200,
+        context_recent_tokens: int = 3500,
         context_compaction_source_tokens: int = 100000,
         input_debounce_seconds: float = 0.65,
         proactive_heartbeat_default_hours: int = 3,
+        behavior_log_enabled: bool = True,
+        behavior_log_path: str = ".opentulpa/logs/agent_behavior.jsonl",
     ) -> None:
         self.app_url = app_url.rstrip("/")
         self.openrouter_api_key = openrouter_api_key
@@ -150,15 +158,15 @@ class OpenTulpaLangGraphRuntime:
         self._customer_profile_service = customer_profile_service
         self._thread_rollup_service = thread_rollup_service
         self._link_alias_service = link_alias_service
-        self._context_token_limit = max(10000, min(30000, int(context_token_limit)))
+        self._context_token_limit = max(6000, min(24000, int(context_token_limit)))
         self._context_short_term_high_tokens = self._context_token_limit
         self._context_short_term_low_tokens = min(
-            max(10000, int(context_recent_tokens)),
-            max(10000, self._context_short_term_high_tokens - 500),
+            max(1500, int(context_recent_tokens)),
+            max(1500, self._context_short_term_high_tokens - 500),
         )
         self._context_rollup_tokens = min(
             max(500, int(context_rollup_tokens)),
-            max(500, self._context_token_limit - 1000),
+            max(500, self._context_short_term_low_tokens - 250),
         )
         # Backward-compat aliases consumed by existing helpers/tests.
         self._context_recent_tokens = self._context_short_term_low_tokens
@@ -168,6 +176,12 @@ class OpenTulpaLangGraphRuntime:
         )
         self._input_debounce_seconds = max(0.0, min(float(input_debounce_seconds), 3.0))
         self._proactive_heartbeat_default_hours = max(1, min(int(proactive_heartbeat_default_hours), 24))
+        self._behavior_log_enabled = bool(behavior_log_enabled)
+        raw_behavior_path = str(behavior_log_path or "").strip() or ".opentulpa/logs/agent_behavior.jsonl"
+        self._behavior_log_path = Path(raw_behavior_path).resolve()
+        self._behavior_log_lock = threading.Lock()
+        if self._behavior_log_enabled:
+            self._behavior_log_path.parent.mkdir(parents=True, exist_ok=True)
 
         self._model = init_chat_model(
             self.model_name,
@@ -223,6 +237,38 @@ class OpenTulpaLangGraphRuntime:
         self._model_with_tools = None
         self._thread_inputs = ThreadInputCoordinator(debounce_seconds=self._input_debounce_seconds)
         self._internal_api = InternalApiClient(base_url=self.app_url)
+
+    def log_behavior_event(self, *, event: str, **fields: Any) -> None:
+        if not bool(getattr(self, "_behavior_log_enabled", False)):
+            return
+        event_name = str(event or "").strip()
+        if not event_name:
+            return
+        payload: dict[str, Any] = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "event": event_name,
+        }
+        for key, value in fields.items():
+            safe_key = str(key or "").strip()
+            if not safe_key:
+                continue
+            payload[safe_key] = value
+        serialized = json.dumps(payload, ensure_ascii=False, default=str)
+        lock = getattr(self, "_behavior_log_lock", None)
+        path = getattr(self, "_behavior_log_path", None)
+        if not isinstance(path, Path):
+            return
+        with suppress(Exception):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        if lock is None:
+            with suppress(Exception):
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(serialized + "\n")
+            return
+        with suppress(Exception):
+            with lock:
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(serialized + "\n")
 
     @staticmethod
     def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -426,27 +472,27 @@ class OpenTulpaLangGraphRuntime:
                 seen_ids.add(lid)
                 selected.append(item)
 
-        if len(selected) < 8:
+        max_aliases = 4
+        if len(selected) < max_aliases:
             recent: list[dict[str, Any]] = []
             with suppress(Exception):
-                recent = self._link_alias_service.list_recent(cid, limit=8)
+                recent = self._link_alias_service.list_recent(cid, limit=max_aliases)
             for item in recent:
                 lid = str(item.get("id", "")).strip().lower()
                 if not lid or lid in seen_ids:
                     continue
                 seen_ids.add(lid)
                 selected.append(item)
-                if len(selected) >= 8:
+                if len(selected) >= max_aliases:
                     break
 
         if not selected:
             return ""
-        lines = [f"- {item['id']}: {item['url']}" for item in selected]
+        lines = [f"- {item['id']}: {item['url']}" for item in selected[:max_aliases]]
         return (
             "Known long-link aliases for this user:\n"
             + "\n".join(lines)
-            + "\nUse these alias IDs when possible for long URLs. "
-            "If you output a known alias ID (e.g., link_abc123), it will be expanded to the full URL automatically."
+            + "\nUse alias IDs for long URLs. Outputting a known alias expands to the full URL."
         )
 
     async def _load_active_directive(self, customer_id: str) -> str | None:
@@ -621,7 +667,7 @@ class OpenTulpaLangGraphRuntime:
             customer_id=cid,
             query=query,
             candidates=candidates,
-            max_skills=2,
+            max_skills=1,
         )
         if not selected:
             return {"skill_names": [], "context": ""}
@@ -629,7 +675,7 @@ class OpenTulpaLangGraphRuntime:
         sections: list[str] = []
         skill_names: list[str] = []
         total_chars = 0
-        max_total_chars = 36000
+        max_total_chars = 9000
         for item in selected:
             name = str(item.get("name", "")).strip()
             if not name:
@@ -641,7 +687,7 @@ class OpenTulpaLangGraphRuntime:
                     json_body={
                         "customer_id": cid,
                         "name": name,
-                        "include_files": True,
+                        "include_files": False,
                         "include_global": True,
                     },
                     timeout=8.0,
@@ -656,21 +702,13 @@ class OpenTulpaLangGraphRuntime:
                 skill_md = str(skill.get("skill_markdown", "")).strip()
                 if not skill_md:
                     continue
-                supporting = skill.get("supporting_files", {})
                 snippet = (
                     f"Skill name: {name}\n"
                     f"Scope: {skill.get('scope', '')}\n"
                     f"Description: {skill.get('description', '')}\n"
                     f"Selection reason: {item.get('reason', '')}\n\n"
-                    f"SKILL.md:\n{skill_md[:12000]}"
+                    f"SKILL.md:\n{skill_md[:3500]}"
                 )
-                if isinstance(supporting, dict) and supporting:
-                    snippet += "\n\nSupporting files (snippets):"
-                    for rel_path, file_text in list(supporting.items())[:6]:
-                        snippet += (
-                            f"\n- {str(rel_path)}:\n"
-                            f"{str(file_text or '')[:3000]}"
-                        )
                 if total_chars + len(snippet) > max_total_chars:
                     break
                 sections.append(snippet)
@@ -890,12 +928,28 @@ class OpenTulpaLangGraphRuntime:
     ) -> str:
         await self.start()
         assert self._graph is not None
+        turn_trace_id = new_short_id("turn")
         turn_state, effective_text = await self._thread_inputs.begin_turn(
             thread_id=thread_id, text=text
         )
         if turn_state is None:
+            self.log_behavior_event(
+                event="turn_merged",
+                trace_id=turn_trace_id,
+                mode="ainvoke",
+                thread_id=thread_id,
+                customer_id=customer_id,
+            )
             return ""
         try:
+            self.log_behavior_event(
+                event="turn_start",
+                trace_id=turn_trace_id,
+                mode="ainvoke",
+                thread_id=thread_id,
+                customer_id=customer_id,
+                input_chars=len(str(effective_text or "")),
+            )
             await self._maybe_compact_thread_context(thread_id=thread_id, customer_id=customer_id)
             merged_text, through_id = self._prepend_pending_context(
                 customer_id=customer_id,
@@ -927,6 +981,7 @@ class OpenTulpaLangGraphRuntime:
                     "messages": [HumanMessage(content=merged_text)],
                     "customer_id": customer_id,
                     "thread_id": thread_id,
+                    "agent_trace_id": turn_trace_id,
                     "tool_error_count": 0,
                     "claim_check_retry_count": 0,
                     "claim_check_needs_retry": False,
@@ -949,8 +1004,33 @@ class OpenTulpaLangGraphRuntime:
                     cleaned = self.expand_link_aliases(customer_id=customer_id, text=cleaned)
                     if through_id is not None and self._context_events is not None:
                         self._context_events.clear_events(customer_id, through_id=through_id)
+                    self.log_behavior_event(
+                        event="turn_complete",
+                        trace_id=turn_trace_id,
+                        mode="ainvoke",
+                        thread_id=thread_id,
+                        customer_id=customer_id,
+                        output_chars=len(cleaned.strip()),
+                    )
                     return cleaned.strip()
+            self.log_behavior_event(
+                event="turn_no_visible_reply",
+                trace_id=turn_trace_id,
+                mode="ainvoke",
+                thread_id=thread_id,
+                customer_id=customer_id,
+            )
             return "I ran into an issue and could not produce a final response yet."
+        except Exception as exc:
+            self.log_behavior_event(
+                event="turn_exception",
+                trace_id=turn_trace_id,
+                mode="ainvoke",
+                thread_id=thread_id,
+                customer_id=customer_id,
+                error=str(exc)[:500],
+            )
+            raise
         finally:
             self._thread_inputs.end_turn(turn_state)
 
@@ -981,6 +1061,7 @@ class OpenTulpaLangGraphRuntime:
     ) -> AsyncIterator[str]:
         await self.start()
         assert self._graph is not None
+        turn_trace_id = new_short_id("turn")
         turn_state, effective_text = await self._thread_inputs.begin_turn(
             thread_id=thread_id, text=text
         )
@@ -990,6 +1071,13 @@ class OpenTulpaLangGraphRuntime:
                 thread_id,
                 customer_id,
             )
+            self.log_behavior_event(
+                event="turn_merged",
+                trace_id=turn_trace_id,
+                mode="astream",
+                thread_id=thread_id,
+                customer_id=customer_id,
+            )
             raise MergedInputSuppressedError("input merged into previous in-flight turn")
         try:
             logger.info(
@@ -997,6 +1085,14 @@ class OpenTulpaLangGraphRuntime:
                 thread_id,
                 customer_id,
                 len(str(effective_text or "")),
+            )
+            self.log_behavior_event(
+                event="turn_start",
+                trace_id=turn_trace_id,
+                mode="astream",
+                thread_id=thread_id,
+                customer_id=customer_id,
+                input_chars=len(str(effective_text or "")),
             )
             await self._maybe_compact_thread_context(thread_id=thread_id, customer_id=customer_id)
             merged_text, through_id = self._prepend_pending_context(
@@ -1043,6 +1139,7 @@ class OpenTulpaLangGraphRuntime:
                     "messages": [HumanMessage(content=merged_text)],
                     "customer_id": customer_id,
                     "thread_id": thread_id,
+                    "agent_trace_id": turn_trace_id,
                     "tool_error_count": 0,
                     "claim_check_retry_count": 0,
                     "claim_check_needs_retry": False,
@@ -1091,11 +1188,18 @@ class OpenTulpaLangGraphRuntime:
                     thread_id,
                     customer_id,
                 )
+                self.log_behavior_event(
+                    event="turn_stream_no_visible_chunks",
+                    trace_id=turn_trace_id,
+                    thread_id=thread_id,
+                    customer_id=customer_id,
+                )
                 fallback_result = await self._graph.ainvoke(
                     {
                         "messages": [HumanMessage(content=merged_text)],
                         "customer_id": customer_id,
                         "thread_id": thread_id,
+                        "agent_trace_id": turn_trace_id,
                         "tool_error_count": 0,
                         "claim_check_retry_count": 0,
                         "claim_check_needs_retry": False,
@@ -1122,25 +1226,62 @@ class OpenTulpaLangGraphRuntime:
                                 text=cleaned,
                             )
                             fallback_yielded = True
+                            self.log_behavior_event(
+                                event="turn_stream_fallback_yielded",
+                                trace_id=turn_trace_id,
+                                thread_id=thread_id,
+                                customer_id=customer_id,
+                                output_chars=len(cleaned.strip()),
+                            )
                             yield cleaned.strip()
                             break
                 if not fallback_yielded:
                     logger.error(
-                        "runtime.astream_text fallback_no_ai_message thread_id=%s customer_id=%s",
+                        "runtime.astream_text fallback_no_ai_message thread_id=%s customer_id=%s messages_count=%s",
                         thread_id,
                         customer_id,
+                        len(fallback_messages),
                     )
+                    self.register_links_from_text(
+                        customer_id=customer_id,
+                        text=STREAM_EMPTY_REPLY_FALLBACK,
+                        source="assistant_turn",
+                        limit=5,
+                    )
+                    yielded_any = True
+                    self.log_behavior_event(
+                        event="turn_stream_fallback_empty",
+                        trace_id=turn_trace_id,
+                        thread_id=thread_id,
+                        customer_id=customer_id,
+                    )
+                    yield STREAM_EMPTY_REPLY_FALLBACK
             logger.info(
                 "runtime.astream_text complete thread_id=%s customer_id=%s yielded_any=%s",
                 thread_id,
                 customer_id,
                 yielded_any,
             )
+            self.log_behavior_event(
+                event="turn_complete",
+                trace_id=turn_trace_id,
+                mode="astream",
+                thread_id=thread_id,
+                customer_id=customer_id,
+                yielded_any=yielded_any,
+            )
         except Exception:
             logger.exception(
                 "runtime.astream_text failed thread_id=%s customer_id=%s",
                 thread_id,
                 customer_id,
+            )
+            self.log_behavior_event(
+                event="turn_exception",
+                trace_id=turn_trace_id,
+                mode="astream",
+                thread_id=thread_id,
+                customer_id=customer_id,
             )
             raise
         finally:
@@ -1205,6 +1346,7 @@ class OpenTulpaLangGraphRuntime:
                 "confidence": 0.0,
                 "reason": "empty_assistant_text",
                 "repair_instruction": "",
+                "usable": True,
             }
         safe_user = str(user_text or "").strip()
         safe_turn_window = str(turn_window or "").strip()
@@ -1225,8 +1367,14 @@ class OpenTulpaLangGraphRuntime:
                             "reason (string <= 180 chars), repair_instruction (string <= 220 chars).\n"
                             "Decision policy (conservative, non-aggressive):\n"
                             "- applies=true only if assistant explicitly claims something was already done/launched/sent/posted/scheduled now.\n"
+                            "- applies=true if assistant commits to an immediate follow-up action in this same turn "
+                            "(e.g., 'doing this now', 'retrying now', 'give me a moment') that should produce tool evidence.\n"
+                            "- If user_message asks only for an outcome/failure summary, assistant must not promise "
+                            "new immediate execution unless tool evidence exists in this turn.\n"
                             "- If assistant is future-tense, conditional, or says approval is pending, set applies=false and mismatch=false.\n"
                             "- mismatch=true only when there is a clear immediate completion claim without matching success evidence in tool outputs.\n"
+                            "- mismatch=true when assistant commits immediate follow-up execution now but no matching tool evidence exists.\n"
+                            "- If assistant claims completed/updated/created/scheduled now AND also states approval is pending, set mismatch=true.\n"
                             "- If evidence is ambiguous/partial, prefer mismatch=false.\n"
                             "- If tool outputs show approval pending, denial, or tool error while assistant claims success now, mismatch=true.\n"
                             "- repair_instruction should tell the agent to either run the missing tool now or restate status honestly.\n"
@@ -1245,7 +1393,29 @@ class OpenTulpaLangGraphRuntime:
             )
             raw = response.content if hasattr(response, "content") else str(response)
             raw_text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
-            parsed = self._extract_json_object(raw_text) or {}
+            parsed = self._extract_json_object(raw_text)
+            if not isinstance(parsed, dict):
+                return {
+                    "ok": False,
+                    "applies": False,
+                    "mismatch": False,
+                    "confidence": 0.0,
+                    "reason": "invalid_checker_output:no_json_object",
+                    "repair_instruction": "",
+                    "usable": False,
+                }
+            required_keys = {"ok", "applies", "mismatch", "confidence", "reason", "repair_instruction"}
+            if not required_keys.issubset(parsed.keys()):
+                missing = ",".join(sorted(required_keys.difference(parsed.keys())))
+                return {
+                    "ok": False,
+                    "applies": False,
+                    "mismatch": False,
+                    "confidence": 0.0,
+                    "reason": f"invalid_checker_output:missing_keys:{missing}"[:180],
+                    "repair_instruction": "",
+                    "usable": False,
+                }
             applies = bool(parsed.get("applies", False))
             mismatch = bool(parsed.get("mismatch", False)) if applies else False
             try:
@@ -1259,6 +1429,7 @@ class OpenTulpaLangGraphRuntime:
                 "confidence": max(0.0, min(confidence, 1.0)),
                 "reason": str(parsed.get("reason", "")).strip()[:180],
                 "repair_instruction": str(parsed.get("repair_instruction", "")).strip()[:220],
+                "usable": True,
             }
         except Exception as exc:
             return {
@@ -1268,6 +1439,7 @@ class OpenTulpaLangGraphRuntime:
                 "confidence": 0.0,
                 "reason": f"classifier_error:{exc}",
                 "repair_instruction": "",
+                "usable": False,
             }
 
     async def classify_guardrail_intent(
@@ -1333,6 +1505,10 @@ class OpenTulpaLangGraphRuntime:
                             "default to gate=allow, impact_type=read, recipient_scope=self.\n"
                             "- Internal system management (routine_delete, automation_delete, routine_list, "
                             "uploaded_file_search/get/analyze, local context/memory reads) should be allow.\n"
+                            "- skill_upsert/skill_delete are local configuration updates (internal only) and "
+                            "should default to gate=allow unless the action itself directly posts/sends externally.\n"
+                            "- directive_set/directive_clear/time_profile_set are internal profile updates and "
+                            "should default to gate=allow.\n"
                             "- For routine_create:\n"
                             "  * If the routine can cause external side effects (posting/sending/mutating external services), "
                             "set gate=require_approval.\n"
@@ -1403,6 +1579,7 @@ class OpenTulpaLangGraphRuntime:
                     "action_name": action_name,
                     "action_args": action_args if isinstance(action_args, dict) else {},
                     "action_note": str(action_note or "").strip()[:2000],
+                    "defer_challenge_delivery": True,
                 },
                 timeout=12.0,
                 retries=1,
@@ -1467,8 +1644,18 @@ class OpenTulpaLangGraphRuntime:
         Used by approval execution to avoid coupling to private runtime attributes.
         """
         await self.start()
+        self.log_behavior_event(
+            event="tool_execute_start",
+            action_name=str(action_name or "").strip(),
+            customer_id=str(customer_id or "").strip(),
+        )
         tool_fn = self._tools.get(str(action_name or "").strip())
         if tool_fn is None:
+            self.log_behavior_event(
+                event="tool_execute_missing",
+                action_name=str(action_name or "").strip(),
+                customer_id=str(customer_id or "").strip(),
+            )
             raise RuntimeError(f"unknown tool: {action_name}")
         args = action_args if isinstance(action_args, dict) else {}
         if inject_customer_id and action_name in APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS:
@@ -1477,7 +1664,16 @@ class OpenTulpaLangGraphRuntime:
             customer_id=str(customer_id or "").strip(),
             args=args,
         )
-        result = await tool_fn.ainvoke(args)
+        try:
+            result = await tool_fn.ainvoke(args)
+        except Exception as exc:
+            self.log_behavior_event(
+                event="tool_execute_error",
+                action_name=str(action_name or "").strip(),
+                customer_id=str(customer_id or "").strip(),
+                error=str(exc)[:500],
+            )
+            raise
         cid = str(customer_id or "").strip()
         if cid:
             self.register_links_from_text(
@@ -1486,4 +1682,10 @@ class OpenTulpaLangGraphRuntime:
                 source=f"tool:{action_name}",
                 limit=40,
             )
+        self.log_behavior_event(
+            event="tool_execute_complete",
+            action_name=str(action_name or "").strip(),
+            customer_id=str(customer_id or "").strip(),
+            result_ok=(not isinstance(result, dict) or bool(result.get("ok", True))),
+        )
         return result

@@ -29,19 +29,19 @@ class Settings(BaseSettings):
         description="Maximum LangGraph steps per turn.",
     )
     agent_context_token_limit: int = Field(
-        default=30000,
+        default=12000,
         ge=10000,
         le=1000000,
         description="Short-term high-watermark (estimated tokens) before thread context compaction.",
     )
     agent_context_recent_tokens: int = Field(
-        default=10000,
+        default=3500,
         ge=1000,
         le=1000000,
         description="Short-term low-watermark target (estimated tokens) after compaction.",
     )
     agent_context_rollup_tokens: int = Field(
-        default=5000,
+        default=2200,
         ge=500,
         le=300000,
         description="Estimated token budget for compressed older-context rollup.",
@@ -130,6 +130,14 @@ class Settings(BaseSettings):
         ge=1,
         le=24,
         description="Default heartbeat interval (hours) when proactive mode auto-enables.",
+    )
+    agent_behavior_log_enabled: bool = Field(
+        default=True,
+        description="Enable structured JSONL behavior logging for agent execution flow.",
+    )
+    agent_behavior_log_path: str = Field(
+        default=".opentulpa/logs/agent_behavior.jsonl",
+        description="Path for structured JSONL behavior logs.",
     )
     openrouter_embedding_model: str = Field(
         default="openai/text-embedding-3-small",

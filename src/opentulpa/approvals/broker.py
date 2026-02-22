@@ -9,9 +9,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from opentulpa.approvals.adapters.base import ApprovalAdapter
-from opentulpa.approvals.evaluator import ApprovalEvaluator
 from opentulpa.approvals.store import PendingApprovalStore
 from opentulpa.core.ids import new_short_id
+from opentulpa.policy.evaluator import ApprovalEvaluator
 
 
 def _first_non_empty(*values: Any) -> str:
@@ -20,6 +20,24 @@ def _first_non_empty(*values: Any) -> str:
         if text:
             return text
     return ""
+
+
+def _execution_succeeded(result: Any) -> bool:
+    """Interpret tool execution payloads conservatively for approval lifecycle."""
+    if not isinstance(result, dict):
+        # Non-dict payloads from older executors are treated as success.
+        return True
+    if bool(result.get("ok", True)) is False:
+        return False
+    if str(result.get("error", "")).strip():
+        return False
+    nested = result.get("result")
+    if isinstance(nested, dict):
+        if bool(nested.get("ok", True)) is False:
+            return False
+        if str(nested.get("error", "")).strip():
+            return False
+    return True
 
 
 class ApprovalBroker:
@@ -77,9 +95,23 @@ class ApprovalBroker:
         conversation_id = conversation_id or ""
         return interface, user_id, conversation_id
 
-    async def _deliver_challenge(self, record: Any) -> str | None:
+    async def _deliver_challenge(
+        self,
+        record: Any,
+        *,
+        defer_delivery: bool = False,
+    ) -> str | None:
         adapter = self._adapters.get(record.origin_interface)
         if adapter is not None:
+            if defer_delivery:
+                queue_fn = getattr(adapter, "queue_challenge", None)
+                if callable(queue_fn):
+                    try:
+                        queued = await queue_fn(record)
+                    except Exception:
+                        queued = False
+                    if queued:
+                        return f"{adapter.name}_deferred"
             try:
                 sent = await adapter.send_challenge(record)
             except Exception:
@@ -107,6 +139,7 @@ class ApprovalBroker:
         origin_interface: str | None = None,
         origin_user_id: str | None = None,
         origin_conversation_id: str | None = None,
+        defer_challenge_delivery: bool = False,
     ) -> dict[str, Any]:
         interface, user_id, conversation_id = self._resolve_origin(
             customer_id=customer_id,
@@ -226,12 +259,40 @@ class ApprovalBroker:
             confidence=float(intent.confidence),
             ttl_seconds=self._ttl_seconds,
         )
-        delivery_mode = await self._deliver_challenge(record)
+        delivery_mode = await self._deliver_challenge(
+            record,
+            defer_delivery=defer_challenge_delivery,
+        )
         decision.approval_id = record.id
         decision.status = record.status
         decision.expires_at = record.expires_at
         decision.delivery_mode = delivery_mode
         return self._evaluator.as_dict(decision)
+
+    async def flush_deferred_challenges(
+        self,
+        *,
+        origin_interface: str,
+        origin_conversation_id: str,
+    ) -> int:
+        interface = str(origin_interface or "").strip()
+        conversation_id = str(origin_conversation_id or "").strip()
+        if not interface or not conversation_id:
+            return 0
+        adapter = self._adapters.get(interface)
+        if adapter is None:
+            return 0
+        flush_fn = getattr(adapter, "flush_challenges", None)
+        if not callable(flush_fn):
+            return 0
+        try:
+            count = await flush_fn(chat_id=conversation_id)
+        except Exception:
+            return 0
+        try:
+            return max(0, int(count))
+        except Exception:
+            return 0
 
     def get(self, approval_id: str) -> dict[str, Any] | None:
         return self._store.as_dict(self._store.get(approval_id))
@@ -380,11 +441,15 @@ class ApprovalBroker:
             action_args = {}
 
         result = await executor(record.action_name, action_args, record.customer_id)
-        updated = self._store.mark_executed(record.id)
+        execution_ok = _execution_succeeded(result)
+        updated = self._store.mark_executed(record.id) if execution_ok else self._store.get(record.id)
+        status = updated.status if updated else ("executed" if execution_ok else "approved")
         return {
-            "ok": bool(updated and updated.status == "executed"),
+            "ok": True,
             "approval_id": record.id,
-            "status": updated.status if updated else "approved",
+            "status": status,
             "action_name": record.action_name,
             "result": result,
+            "execution_ok": execution_ok,
+            "retryable": not execution_ok,
         }

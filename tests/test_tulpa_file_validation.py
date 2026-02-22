@@ -55,3 +55,22 @@ def test_validate_file_endpoint_accepts_valid_router_module() -> None:
         assert payload["router_contract_ok"] is True
     finally:
         _cleanup(rel)
+
+
+def test_write_file_allows_tulpa_script_with_main_guard() -> None:
+    rel = _tmp_rel("script_main_guard")
+    content = (
+        "import json\n\n"
+        "def run() -> None:\n"
+        "    print(json.dumps({'ok': True}))\n\n"
+        "if __name__ == '__main__':\n"
+        "    run()\n"
+    )
+    try:
+        sandbox.write_file(rel, content)
+        validation = sandbox.validate_generated_file(rel)
+        assert validation["ok"] is True
+        assert validation["python_syntax_ok"] is True
+        assert validation["router_contract_ok"] is None
+    finally:
+        _cleanup(rel)

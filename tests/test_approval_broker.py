@@ -22,6 +22,30 @@ class _CaptureAdapter:
         return True
 
 
+class _DeferredCaptureAdapter:
+    name = "capture"
+    interactive = True
+
+    def __init__(self) -> None:
+        self.sent: list[object] = []
+        self.queued: list[object] = []
+
+    async def send_challenge(self, approval) -> bool:  # type: ignore[no-untyped-def]
+        self.sent.append(approval)
+        return True
+
+    async def queue_challenge(self, approval) -> bool:  # type: ignore[no-untyped-def]
+        self.queued.append(approval)
+        return True
+
+    async def flush_challenges(self, *, chat_id: str) -> int:
+        _ = chat_id
+        count = len(self.queued)
+        self.sent.extend(self.queued)
+        self.queued = []
+        return count
+
+
 class _ClassifierRuntime:
     async def classify_guardrail_intent(
         self,
@@ -111,6 +135,27 @@ class _ClassifierRuntime:
         }
 
 
+class _ParanoidClassifierRuntime:
+    async def classify_guardrail_intent(
+        self,
+        *,
+        action_name: str,
+        action_args: dict[str, object],
+        action_note: str | None = None,
+    ) -> dict[str, object]:
+        _ = action_name
+        _ = action_args
+        _ = action_note
+        return {
+            "ok": True,
+            "gate": "require_approval",
+            "impact_type": "write",
+            "recipient_scope": "external",
+            "confidence": 0.95,
+            "reason": "paranoid-default",
+        }
+
+
 def _origin_resolver(customer_id: str, thread_id: str) -> dict[str, str]:
     assert customer_id
     assert thread_id
@@ -172,6 +217,27 @@ async def test_routine_delete_is_internal_no_approval(
 
 
 @pytest.mark.asyncio
+async def test_skill_upsert_is_internal_no_approval_even_if_classifier_is_paranoid(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, adapter = broker_factory(runtime=_ParanoidClassifierRuntime())
+    result = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="chat-42",
+        action_name="skill_upsert",
+        action_args={
+            "customer_id": "telegram_42",
+            "name": "growth-skill",
+            "description": "desc",
+            "instructions": "search and summarize",
+        },
+    )
+    assert result["gate"] == "allow"
+    assert result.get("approval_id") is None
+    assert len(adapter.sent) == 0
+
+
+@pytest.mark.asyncio
 async def test_external_action_requires_approval_and_reuses_pending(
     broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
 ) -> None:
@@ -189,6 +255,37 @@ async def test_external_action_requires_approval_and_reuses_pending(
     assert first["approval_id"] == second["approval_id"]
     assert len(adapter.sent) == 1
     assert second.get("delivery_mode") == "existing_pending"
+
+
+@pytest.mark.asyncio
+async def test_external_action_can_defer_challenge_delivery(tmp_path: Path) -> None:
+    adapter = _DeferredCaptureAdapter()
+    broker = ApprovalBroker(
+        store=PendingApprovalStore(db_path=tmp_path / "approvals_defer.db"),
+        runtime=_ClassifierRuntime(),
+        adapters={"telegram": adapter},
+        origin_resolver=_origin_resolver,
+    )
+    result = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="chat-42",
+        action_name="slack_post",
+        action_args={"channel_id": "C123", "text": "hello"},
+        defer_challenge_delivery=True,
+    )
+
+    assert result["gate"] == "require_approval"
+    assert str(result.get("delivery_mode", "")).endswith("_deferred")
+    assert len(adapter.queued) == 1
+    assert len(adapter.sent) == 0
+
+    flushed = await broker.flush_deferred_challenges(
+        origin_interface="telegram",
+        origin_conversation_id="4242",
+    )
+    assert flushed == 1
+    assert len(adapter.queued) == 0
+    assert len(adapter.sent) == 1
 
 
 @pytest.mark.asyncio
@@ -290,6 +387,59 @@ async def test_exact_duplicate_after_executed_is_denied_without_reprompt(
     again = await broker.evaluate_action(**request)
     assert again["gate"] == "deny"
     assert again["reason"] == "already_executed_recent_duplicate"
+    assert again.get("approval_id") is None
+    assert len(adapter.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_execution_keeps_approval_reusable_without_reprompt(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, adapter = broker_factory()
+    request = {
+        "customer_id": "telegram_42",
+        "thread_id": "chat-42",
+        "action_name": "slack_post",
+        "action_args": {"channel_id": "C123", "text": "hello"},
+    }
+
+    first = await broker.evaluate_action(**request)
+    approval_id = str(first.get("approval_id", "")).strip()
+    assert first["gate"] == "require_approval"
+    assert approval_id
+
+    decided = await broker.decide(
+        approval_id=approval_id,
+        decision="approve",
+        actor_interface="telegram",
+        actor_id="42",
+    )
+    assert decided["ok"] is True
+    assert decided["status"] == "approved"
+
+    async def _executor_fail(
+        action_name: str,
+        action_args: dict[str, object],
+        customer_id: str,
+    ) -> dict[str, object]:
+        _ = action_name
+        _ = action_args
+        _ = customer_id
+        return {"ok": False, "error": "transient network failure"}
+
+    failed = await broker.execute_approved_action(
+        approval_id=approval_id,
+        customer_id="telegram_42",
+        executor=_executor_fail,
+    )
+    assert failed["ok"] is True
+    assert failed["status"] == "approved"
+    assert failed["execution_ok"] is False
+    assert failed["retryable"] is True
+
+    again = await broker.evaluate_action(**request)
+    assert again["gate"] == "allow"
+    assert again["reason"] == "reuse_recent_approved"
     assert again.get("approval_id") is None
     assert len(adapter.sent) == 1
 
