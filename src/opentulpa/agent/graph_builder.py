@@ -36,7 +36,8 @@ def build_runtime_graph(runtime: Any):
         "tulpa_validate_file": ("path",),
         "tulpa_read_file": ("path",),
         "tulpa_run_terminal": ("command",),
-        "fetch_link_content": ("url",),
+        "fetch_url_content": ("url",),
+        "fetch_file_content": ("url",),
         "uploaded_file_search": ("query",),
         "uploaded_file_get": ("file_id",),
         "uploaded_file_send": ("file_id",),
@@ -83,13 +84,15 @@ def build_runtime_graph(runtime: Any):
             "in routine_create so later cleanup can be deterministic. "
             "If user tells you their timezone or UTC offset, call time_profile_set. "
             "Tool-selection policy: "
-            "1) If user gives a specific URL to read, call fetch_link_content first. "
-            "2) If user needs general/current info discovery, use web_search first, then fetch_link_content for exact links. "
-            "3) Use browser_use_run only when the task requires real browser interaction (clicking, forms, login, "
+            "1) If user gives a specific webpage URL to read, call fetch_url_content first. "
+            "2) If user gives a direct file URL (pdf/docx/image), call fetch_file_content. "
+            "3) If user needs general/current info discovery, use web_search first, then fetch_url_content/fetch_file_content for exact links. "
+            "Never use legacy ':online' suffix models. "
+            "4) Use browser_use_run only when the task requires real browser interaction (clicking, forms, login, "
             "multi-step navigation, dynamic JS rendering) or when simpler tools are insufficient. "
             "Prefer the cheapest/simplest tool path that can satisfy the objective. "
             "When a user provides a specific URL and asks to inspect/read/summarize it, "
-            "call fetch_link_content first (do not rely only on web_search). "
+            "call fetch_url_content or fetch_file_content based on URL type (do not rely only on web_search). "
             "When users refer to files they uploaded earlier (e.g. 'the table/orders file'), "
             "use uploaded_file_search, then uploaded_file_get/uploaded_file_analyze/uploaded_file_send as needed. "
             "Use known link aliases (link_*) for very long URLs to reduce copy errors. "
@@ -430,7 +433,8 @@ def build_runtime_graph(runtime: Any):
             "time_profile_get",
             "time_profile_set",
             "web_search",
-            "fetch_link_content",
+            "fetch_url_content",
+            "fetch_file_content",
             "uploaded_file_search",
             "uploaded_file_get",
             "uploaded_file_analyze",
