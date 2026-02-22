@@ -18,7 +18,7 @@ from opentulpa.agent.utils import (
 
 
 def _rollup_token_budget(runtime: Any) -> int:
-    return max(500, int(getattr(runtime, "_context_rollup_tokens", 5000)))
+    return max(500, int(getattr(runtime, "_context_rollup_tokens", 2200)))
 
 
 def _short_term_high_token_budget(runtime: Any) -> int:
@@ -26,7 +26,7 @@ def _short_term_high_token_budget(runtime: Any) -> int:
         getattr(
             runtime,
             "_context_short_term_high_tokens",
-            getattr(runtime, "_context_token_limit", 30000),
+            getattr(runtime, "_context_token_limit", 12000),
         )
     )
     return max(2000, configured)
@@ -37,7 +37,7 @@ def _short_term_low_token_budget(runtime: Any) -> int:
         getattr(
             runtime,
             "_context_short_term_low_tokens",
-            getattr(runtime, "_context_recent_tokens", 10000),
+            getattr(runtime, "_context_recent_tokens", 3500),
         )
     )
     high = _short_term_high_token_budget(runtime)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -13,6 +12,7 @@ from typing import Any
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
+from opentulpa.application.approval_execution import ApprovalExecutionOrchestrator
 from opentulpa.interfaces.telegram.client import (
     parse_telegram_callback_query,
     parse_telegram_update,
@@ -55,126 +55,16 @@ async def _execute_approved_action_and_summarize(
     decision_payload: dict[str, Any],
     chat_id: int,
 ) -> str:
-    customer_id = str(decision_payload.get("customer_id", "")).strip()
-    thread_id = str(decision_payload.get("thread_id", "")).strip() or f"chat-{chat_id}"
-    if not customer_id:
-        return "I approved this action, but couldn't resolve the customer context to execute it."
-    runtime = get_agent_runtime()
-    if runtime is None:
-        return "I approved this action, but runtime is unavailable right now."
-    if not hasattr(runtime, "execute_tool"):
-        return "I approved this action, but runtime cannot execute approved actions."
-
-    try:
-        execution_result = await runtime.execute_tool(
-            action_name="guardrail_execute_approved_action",
-            action_args={"approval_id": approval_id, "customer_id": customer_id},
-        )
-    except Exception as exc:
-        error_detail = str(exc).strip() or exc.__class__.__name__
-        with suppress(Exception):
-            get_context_events().add_event(
-                customer_id=customer_id,
-                source="approval",
-                event_type="execute_failed",
-                payload={
-                    "approval_id": approval_id,
-                    "thread_id": thread_id,
-                    "error": error_detail,
-                },
-            )
-        return f"I couldn't execute the approved action: {error_detail}"
-
-    with suppress(Exception):
-        get_context_events().add_event(
-            customer_id=customer_id,
-            source="approval",
-            event_type="executed",
-            payload={
-                "approval_id": approval_id,
-                "thread_id": thread_id,
-                "execution_result": execution_result if isinstance(execution_result, dict) else {"raw": str(execution_result)},
-            },
-        )
-
-    if isinstance(execution_result, dict) and bool(execution_result.get("already_executed")):
-        return "This approved action was already executed successfully earlier."
-
-    payload_preview = json.dumps(execution_result, ensure_ascii=False)[:6000]
-    is_error_result = isinstance(execution_result, dict) and bool(
-        str(execution_result.get("error", "")).strip()
+    """Backward-compatible helper kept for tests/internal call sites."""
+    orchestrator = ApprovalExecutionOrchestrator(
+        get_agent_runtime=get_agent_runtime,
+        get_context_events=get_context_events,
     )
-    if is_error_result:
-        try:
-            original_action = str(decision_payload.get("action_name", "")).strip()
-            original_summary = str(decision_payload.get("summary", "")).strip()
-            original_args = decision_payload.get("action_args")
-            if not isinstance(original_args, dict):
-                original_args = {}
-            recovery_text = await runtime.ainvoke_text(
-                thread_id=thread_id,
-                customer_id=customer_id,
-                text=(
-                    "An approved action failed during execution. Continue autonomously and try to fix it.\n\n"
-                    f"original_action={original_action}\n"
-                    f"original_summary={original_summary}\n"
-                    f"original_action_args={json.dumps(original_args, ensure_ascii=False)[:4000]}\n"
-                    f"failure_result={payload_preview}\n\n"
-                    "Instructions:\n"
-                    "1) Retry/fix on your own using tools.\n"
-                    "2) If resolved, report final success + deliverable.\n"
-                    "3) If still unresolved after substantial attempts, report what you tried and ask user whether to continue.\n"
-                    "Do not leak internal JSON or system internals."
-                ),
-                include_pending_context=False,
-                recursion_limit_override=48,
-            )
-            recovered = str(recovery_text or "").strip()
-            if recovered:
-                return recovered
-        except Exception:
-            pass
-    try:
-        if is_error_result:
-            summary_prompt = (
-                "A previously approved action execution failed.\n"
-                f"approval_id={approval_id}\n"
-                f"execution_result={payload_preview}\n\n"
-                "Write a concise user-facing failure update in plain text:\n"
-                "1) what failed,\n"
-                "2) likely reason from the error/result payload,\n"
-                "3) exact next step the user should take.\n"
-                "Do not expose internal JSON or system internals."
-            )
-        else:
-            summary_prompt = (
-                "A previously approved action has just been executed.\n"
-                f"approval_id={approval_id}\n"
-                f"execution_result={payload_preview}\n\n"
-                "Write a concise user-facing outcome message in plain text:\n"
-                "1) what was done,\n"
-                "2) whether it succeeded,\n"
-                "3) next step only if needed.\n"
-                "Do not expose internal JSON or system internals."
-            )
-        summary = await runtime.ainvoke_text(
-            thread_id=thread_id,
-            customer_id=customer_id,
-            text=summary_prompt,
-            include_pending_context=False,
-        )
-    except Exception:
-        summary = ""
-
-    final = str(summary or "").strip()
-    if final:
-        return final
-    if isinstance(execution_result, dict) and str(execution_result.get("error", "")).strip():
-        return (
-            "I couldn't execute the approved action. "
-            f"Error: {str(execution_result.get('error', '')).strip()}"
-        )
-    return "Task completed."
+    return await orchestrator.execute_approved_action_and_summarize(
+        approval_id=approval_id,
+        decision_payload=decision_payload,
+        chat_id=chat_id,
+    )
 
 
 async def _emit_typing_until_done(
@@ -193,8 +83,7 @@ async def _emit_typing_until_done(
 async def _run_post_approval_execution_flow(
     *,
     get_telegram_client: Callable[[], Any],
-    get_agent_runtime: Callable[[], Any],
-    get_context_events: Callable[[], Any],
+    get_approval_execution_orchestrator: Callable[[], Any],
     approval_ids: list[str],
     decision_payload: dict[str, Any],
     chat_id: int,
@@ -222,24 +111,11 @@ async def _run_post_approval_execution_flow(
     )
     final_outcome = "I couldn't execute the approved action due to an internal error."
     try:
-        outcomes: list[str] = []
-        for aid in safe_ids:
-            outcome = await _execute_approved_action_and_summarize(
-                get_agent_runtime=get_agent_runtime,
-                get_context_events=get_context_events,
-                approval_id=aid,
-                decision_payload=decision_payload,
-                chat_id=chat_id,
-            )
-            if outcome:
-                outcomes.append(str(outcome).strip())
-        if not outcomes:
-            final_outcome = "No approved actions were executed."
-        elif len(outcomes) == 1:
-            final_outcome = outcomes[0]
-        else:
-            merged = "\n\n".join(f"{idx}. {text}" for idx, text in enumerate(outcomes, start=1))
-            final_outcome = f"Completed approved actions:\n\n{merged}"
+        final_outcome = await get_approval_execution_orchestrator().execute_group_and_merge(
+            approval_ids=safe_ids,
+            decision_payload=decision_payload,
+            chat_id=chat_id,
+        )
     finally:
         if not loader_stop.is_set():
             loader_stop.set()
@@ -257,7 +133,7 @@ def register_telegram_webhook_routes(
     get_telegram_client: Callable[[], Any],
     get_telegram_chat: Callable[[], Any],
     get_agent_runtime: Callable[[], Any],
-    get_context_events: Callable[[], Any],
+    get_approval_execution_orchestrator: Callable[[], Any],
     decide_approval_and_maybe_wake: Callable[..., Awaitable[dict[str, Any]]],
 ) -> None:
     """Register Telegram webhook with callback + text-token approval support."""
@@ -354,8 +230,7 @@ def register_telegram_webhook_routes(
                 exec_ids = executable_ids or [approval_id]
                 await _run_post_approval_execution_flow(
                     get_telegram_client=get_telegram_client,
-                    get_agent_runtime=get_agent_runtime,
-                    get_context_events=get_context_events,
+                    get_approval_execution_orchestrator=get_approval_execution_orchestrator,
                     approval_ids=exec_ids,
                     decision_payload=result if isinstance(result, dict) else {},
                     chat_id=callback_chat_id,
@@ -426,8 +301,7 @@ def register_telegram_webhook_routes(
                 exec_ids = executable_ids or [approval_id]
                 await _run_post_approval_execution_flow(
                     get_telegram_client=get_telegram_client,
-                    get_agent_runtime=get_agent_runtime,
-                    get_context_events=get_context_events,
+                    get_approval_execution_orchestrator=get_approval_execution_orchestrator,
                     approval_ids=exec_ids,
                     decision_payload=result if isinstance(result, dict) else {},
                     chat_id=int(chat_id),

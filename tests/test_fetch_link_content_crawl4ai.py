@@ -27,7 +27,7 @@ class _Crawler:
     def __init__(self, result: _Result) -> None:
         self._result = result
 
-    async def __aenter__(self) -> "_Crawler":
+    async def __aenter__(self) -> _Crawler:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]

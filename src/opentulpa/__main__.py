@@ -143,6 +143,8 @@ def main() -> None:
             context_rollup_tokens=settings.agent_context_rollup_tokens,
             context_compaction_source_tokens=settings.agent_context_compaction_source_tokens,
             proactive_heartbeat_default_hours=settings.proactive_heartbeat_default_hours,
+            behavior_log_enabled=settings.agent_behavior_log_enabled,
+            behavior_log_path=settings.agent_behavior_log_path,
         )
     else:
         print(

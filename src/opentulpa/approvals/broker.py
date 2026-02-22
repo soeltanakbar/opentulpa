@@ -9,9 +9,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from opentulpa.approvals.adapters.base import ApprovalAdapter
-from opentulpa.approvals.evaluator import ApprovalEvaluator
 from opentulpa.approvals.store import PendingApprovalStore
 from opentulpa.core.ids import new_short_id
+from opentulpa.policy.evaluator import ApprovalEvaluator
 
 
 def _first_non_empty(*values: Any) -> str:
@@ -20,6 +20,24 @@ def _first_non_empty(*values: Any) -> str:
         if text:
             return text
     return ""
+
+
+def _execution_succeeded(result: Any) -> bool:
+    """Interpret tool execution payloads conservatively for approval lifecycle."""
+    if not isinstance(result, dict):
+        # Non-dict payloads from older executors are treated as success.
+        return True
+    if bool(result.get("ok", True)) is False:
+        return False
+    if str(result.get("error", "")).strip():
+        return False
+    nested = result.get("result")
+    if isinstance(nested, dict):
+        if bool(nested.get("ok", True)) is False:
+            return False
+        if str(nested.get("error", "")).strip():
+            return False
+    return True
 
 
 class ApprovalBroker:
@@ -380,11 +398,15 @@ class ApprovalBroker:
             action_args = {}
 
         result = await executor(record.action_name, action_args, record.customer_id)
-        updated = self._store.mark_executed(record.id)
+        execution_ok = _execution_succeeded(result)
+        updated = self._store.mark_executed(record.id) if execution_ok else self._store.get(record.id)
+        status = updated.status if updated else ("executed" if execution_ok else "approved")
         return {
-            "ok": bool(updated and updated.status == "executed"),
+            "ok": True,
             "approval_id": record.id,
-            "status": updated.status if updated else "approved",
+            "status": status,
             "action_name": record.action_name,
             "result": result,
+            "execution_ok": execution_ok,
+            "retryable": not execution_ok,
         }

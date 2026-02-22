@@ -337,6 +337,59 @@ async def test_exact_duplicate_after_executed_is_denied_without_reprompt(
 
 
 @pytest.mark.asyncio
+async def test_failed_execution_keeps_approval_reusable_without_reprompt(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, adapter = broker_factory()
+    request = {
+        "customer_id": "telegram_42",
+        "thread_id": "chat-42",
+        "action_name": "slack_post",
+        "action_args": {"channel_id": "C123", "text": "hello"},
+    }
+
+    first = await broker.evaluate_action(**request)
+    approval_id = str(first.get("approval_id", "")).strip()
+    assert first["gate"] == "require_approval"
+    assert approval_id
+
+    decided = await broker.decide(
+        approval_id=approval_id,
+        decision="approve",
+        actor_interface="telegram",
+        actor_id="42",
+    )
+    assert decided["ok"] is True
+    assert decided["status"] == "approved"
+
+    async def _executor_fail(
+        action_name: str,
+        action_args: dict[str, object],
+        customer_id: str,
+    ) -> dict[str, object]:
+        _ = action_name
+        _ = action_args
+        _ = customer_id
+        return {"ok": False, "error": "transient network failure"}
+
+    failed = await broker.execute_approved_action(
+        approval_id=approval_id,
+        customer_id="telegram_42",
+        executor=_executor_fail,
+    )
+    assert failed["ok"] is True
+    assert failed["status"] == "approved"
+    assert failed["execution_ok"] is False
+    assert failed["retryable"] is True
+
+    again = await broker.evaluate_action(**request)
+    assert again["gate"] == "allow"
+    assert again["reason"] == "reuse_recent_approved"
+    assert again.get("approval_id") is None
+    assert len(adapter.sent) == 1
+
+
+@pytest.mark.asyncio
 async def test_background_thread_external_actions_allow_without_per_run_prompt(
     broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
 ) -> None:

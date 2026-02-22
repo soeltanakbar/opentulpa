@@ -176,6 +176,25 @@ def _extract_router_names(tree: ast.Module) -> set[str]:
     return names
 
 
+def _has_main_guard(tree: ast.Module) -> bool:
+    for node in tree.body:
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        if (
+            isinstance(test, ast.Compare)
+            and len(test.ops) == 1
+            and isinstance(test.ops[0], ast.Eq)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "__name__"
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant)
+            and str(test.comparators[0].value) == "__main__"
+        ):
+            return True
+    return False
+
+
 def validate_generated_file(relative_path: str) -> dict[str, Any]:
     rel = str(relative_path or "").strip()
     if not rel:
@@ -203,7 +222,7 @@ def validate_generated_file(relative_path: str) -> dict[str, Any]:
         raise ValueError(f"Python syntax validation failed: {exc.msg} (line {exc.lineno})") from exc
     result["python_syntax_ok"] = True
 
-    if _is_tulpa_router_module(target):
+    if _is_tulpa_router_module(target) and not _has_main_guard(tree):
         names = _extract_router_names(tree)
         if "router" not in names:
             raise ValueError(

@@ -1,4 +1,4 @@
-"""Approval policy/intention evaluator used by the broker."""
+"""Approval policy/intention evaluator used by the approval broker."""
 
 from __future__ import annotations
 
@@ -344,3 +344,4 @@ class ApprovalEvaluator:
     @staticmethod
     def as_dict(decision: GateDecision) -> dict[str, Any]:
         return asdict(decision)
+

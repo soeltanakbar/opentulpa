@@ -3,19 +3,15 @@
 from __future__ import annotations
 
 import logging
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, FastAPI
 
-from opentulpa.api.file_helpers import (
-    download_image_from_web_url,
-    infer_image_filename,
-    safe_telegram_filename,
-)
 from opentulpa.api.routes import (
     register_approval_routes,
+    register_chat_routes,
     register_file_routes,
     register_health_routes,
     register_memory_routes,
@@ -29,6 +25,11 @@ from opentulpa.api.routes import (
     register_wake_and_search_routes,
 )
 from opentulpa.api.tulpa_loader import TulpaRouterLoader
+from opentulpa.application import (
+    ApprovalExecutionOrchestrator,
+    TurnOrchestrator,
+    WakeOrchestrator,
+)
 from opentulpa.approvals.adapters.telegram import TelegramApprovalAdapter
 from opentulpa.approvals.adapters.text_token import TextTokenApprovalAdapter
 from opentulpa.approvals.broker import ApprovalBroker
@@ -41,7 +42,6 @@ from opentulpa.core.config import get_settings
 from opentulpa.integrations.slack_client import grant_slack_write_consent, has_slack_write_consent
 from opentulpa.interfaces.telegram.chat_service import TelegramChatService
 from opentulpa.interfaces.telegram.client import TelegramClient
-from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
 from opentulpa.memory.service import MemoryService
 from opentulpa.scheduler.service import SchedulerService
 from opentulpa.skills.service import SkillStoreService
@@ -51,11 +51,6 @@ from opentulpa.tasks.service import TaskService
 from opentulpa.tasks.wake_queue import WakeQueueService
 
 logger = logging.getLogger(__name__)
-
-# Backward-compatible helper exports for existing tests/callers.
-_download_image_from_web_url = download_image_from_web_url
-_infer_image_filename = infer_image_filename
-_safe_telegram_filename = safe_telegram_filename
 
 
 def _require(value: Any, name: str) -> Any:
@@ -103,7 +98,7 @@ def create_app(
     )
     skill_service.ensure_default_skill()
     if runtime is not None and getattr(runtime, "_link_alias_service", None) is None:
-        setattr(runtime, "_link_alias_service", alias_service)
+        runtime._link_alias_service = alias_service  # type: ignore[attr-defined]
 
     telegram_client = (
         TelegramClient(settings.telegram_bot_token) if settings.telegram_bot_token else None
@@ -151,6 +146,11 @@ def create_app(
     def get_agent_runtime() -> Any:
         return runtime
 
+    turn_orchestrator = TurnOrchestrator(agent_runtime=runtime)
+
+    def get_turn_orchestrator() -> TurnOrchestrator:
+        return turn_orchestrator
+
     def resolve_approval_origin(customer_id: str, thread_id: str) -> dict[str, Any]:
         if telegram_chat is None:
             return {}
@@ -196,6 +196,14 @@ def create_app(
     def get_approvals() -> ApprovalBroker:
         return approvals
 
+    approval_execution_orchestrator = ApprovalExecutionOrchestrator(
+        get_agent_runtime=get_agent_runtime,
+        get_context_events=get_context_events,
+    )
+
+    def get_approval_execution_orchestrator() -> ApprovalExecutionOrchestrator:
+        return approval_execution_orchestrator
+
     wake_queue_service: WakeQueueService | None = None
     tulpa_loader: TulpaRouterLoader | None = None
     tulpa_router = APIRouter()
@@ -206,202 +214,17 @@ def create_app(
     def get_tulpa_loader() -> TulpaRouterLoader:
         return _require(tulpa_loader, "TulpaRouterLoader")
 
+    wake_orchestrator = WakeOrchestrator(
+        settings=settings,
+        get_context_events=get_context_events,
+        get_telegram_chat=get_telegram_chat,
+        get_telegram_client=get_telegram_client,
+        get_agent_runtime=get_agent_runtime,
+    )
+
     async def process_wake_event(body: dict[str, Any]) -> None:
         logger.info("Processing wake event: %s", body)
-        wake_type = str(body.get("type", "")).strip()
-        if wake_type not in {"task_event", "routine_event", "approval_event"}:
-            return
-        if wake_type == "approval_event":
-            customer_id = str(body.get("customer_id", "")).strip()
-            payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
-            event_type = str(body.get("event_type", payload.get("event_type", "approved"))).strip()
-            if not customer_id:
-                return
-            queue_payload = {
-                "approval_id": str(body.get("approval_id", payload.get("approval_id", ""))).strip(),
-                "event_type": event_type,
-                "payload": payload,
-            }
-            if not settings.telegram_bot_token or runtime is None:
-                get_context_events().add_event(
-                    customer_id=customer_id,
-                    source="approval",
-                    event_type=event_type,
-                    payload=queue_payload,
-                )
-                return
-            try:
-                replies = await get_telegram_chat().relay_event(
-                    customer_id=customer_id,
-                    event_label=f"approval/{event_type}",
-                    payload=queue_payload,
-                    agent_runtime=runtime,
-                )
-            except Exception:
-                get_context_events().add_event(
-                    customer_id=customer_id,
-                    source="approval",
-                    event_type=event_type,
-                    payload=queue_payload,
-                )
-                return
-            if not replies:
-                get_context_events().add_event(
-                    customer_id=customer_id,
-                    source="approval",
-                    event_type=event_type,
-                    payload=queue_payload,
-                )
-                return
-            for item in replies:
-                await get_telegram_client().send_message(
-                    chat_id=item["chat_id"],
-                    text=item["text"],
-                    parse_mode="HTML",
-                )
-                with suppress(Exception):
-                    get_telegram_chat().touch_assistant_message(int(item["chat_id"]))
-            return
-
-        if wake_type == "task_event":
-            customer_id = str(body.get("customer_id", "")).strip()
-            event_type = str(body.get("event_type", "")).strip()
-            payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
-            if not customer_id or event_type not in {"done", "failed", "needs_input", "worker_stopped"}:
-                return
-
-            should_notify = event_type == "needs_input"
-            if not should_notify and runtime and hasattr(runtime, "classify_wake_event"):
-                decision = await runtime.classify_wake_event(
-                    customer_id=customer_id,
-                    event_label=f"task/{event_type}",
-                    payload={
-                        "task_id": str(body.get("task_id", "")),
-                        "payload": payload,
-                    },
-                )
-                should_notify = bool(decision.get("notify_user", False))
-
-            if not should_notify:
-                get_context_events().add_event(
-                    customer_id=customer_id,
-                    source="task",
-                    event_type=event_type,
-                    payload={"task_id": str(body.get("task_id", "")), **payload},
-                )
-                return
-            if not settings.telegram_bot_token:
-                get_context_events().add_event(
-                    customer_id=customer_id,
-                    source="task",
-                    event_type=event_type,
-                    payload={"task_id": str(body.get("task_id", "")), **payload},
-                )
-                return
-            try:
-                replies = await get_telegram_chat().relay_task_event(
-                    customer_id=customer_id,
-                    task_id=str(body.get("task_id", "")),
-                    event_type=event_type,
-                    payload=payload,
-                    agent_runtime=runtime,
-                )
-            except Exception:
-                get_context_events().add_event(
-                    customer_id=customer_id,
-                    source="task",
-                    event_type=event_type,
-                    payload={"task_id": str(body.get("task_id", "")), **payload},
-                )
-                return
-            if not replies:
-                get_context_events().add_event(
-                    customer_id=customer_id,
-                    source="task",
-                    event_type=event_type,
-                    payload={"task_id": str(body.get("task_id", "")), **payload},
-                )
-                return
-            for item in replies:
-                await get_telegram_client().send_message(
-                    chat_id=item["chat_id"],
-                    text=item["text"],
-                    parse_mode="HTML",
-                )
-            return
-
-        payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
-        customer_id = str(body.get("customer_id") or payload.get("customer_id") or "").strip()
-        if not customer_id:
-            return
-        event_type = str(body.get("event_type") or payload.get("event_type") or "scheduled").strip()
-        notify_raw = body.get("notify_user", payload.get("notify_user", True))
-        notify_user = not (
-            notify_raw is False or str(notify_raw).strip().lower() in {"0", "false", "no", "off"}
-        )
-        routine_id = str(body.get("routine_id") or payload.get("routine_id") or "").strip()
-        routine_name = str(body.get("routine_name") or payload.get("routine_name") or "").strip()
-        queue_payload = {
-            "routine_id": routine_id,
-            "routine_name": routine_name,
-            "event_type": event_type,
-            "notify_user": bool(notify_user),
-            "payload": payload,
-        }
-        if not notify_user:
-            get_context_events().add_event(
-                customer_id=customer_id,
-                source="routine",
-                event_type=event_type,
-                payload=queue_payload,
-            )
-            return
-        if not settings.telegram_bot_token or runtime is None:
-            get_context_events().add_event(
-                customer_id=customer_id,
-                source="routine",
-                event_type=event_type,
-                payload=queue_payload,
-            )
-            return
-        try:
-            replies = await get_telegram_chat().relay_event(
-                customer_id=customer_id,
-                event_label=f"routine/{event_type}",
-                payload=queue_payload,
-                agent_runtime=runtime,
-            )
-        except Exception:
-            get_context_events().add_event(
-                customer_id=customer_id,
-                source="routine",
-                event_type=event_type,
-                payload=queue_payload,
-            )
-            return
-        if not replies:
-            get_context_events().add_event(
-                customer_id=customer_id,
-                source="routine",
-                event_type=event_type,
-                payload=queue_payload,
-            )
-            return
-        sent_any = False
-        for item in replies:
-            safe_text = str(item.get("text", "")).strip()
-            if not safe_text or safe_text == NO_NOTIFY_TOKEN:
-                continue
-            await get_telegram_client().send_message(
-                chat_id=item["chat_id"],
-                text=safe_text,
-                parse_mode="HTML",
-            )
-            with suppress(Exception):
-                get_telegram_chat().touch_assistant_message(int(item["chat_id"]))
-            sent_any = True
-        if not sent_any:
-            return
+        await wake_orchestrator.handle_event(body)
 
     wake_queue_service = WakeQueueService(
         db_path=PROJECT_ROOT / ".opentulpa" / "wake_events.db",
@@ -444,6 +267,7 @@ def create_app(
     app.include_router(tulpa_router, prefix="/tulpa")
 
     register_health_routes(app, get_agent_runtime=get_agent_runtime)
+    register_chat_routes(app, get_turn_orchestrator=get_turn_orchestrator)
     register_memory_routes(app, get_memory=get_memory)
     register_file_routes(
         app,
@@ -497,7 +321,7 @@ def create_app(
         get_telegram_client=get_telegram_client,
         get_telegram_chat=get_telegram_chat,
         get_agent_runtime=get_agent_runtime,
-        get_context_events=get_context_events,
+        get_approval_execution_orchestrator=get_approval_execution_orchestrator,
         decide_approval_and_maybe_wake=decide_approval_and_maybe_wake,
     )
 

@@ -11,7 +11,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any
 
-from opentulpa.agent.runtime import MergedInputSuppressedError, STREAM_WAIT_SIGNAL
+from opentulpa.agent.runtime import STREAM_WAIT_SIGNAL, MergedInputSuppressedError
 from opentulpa.core.ids import new_short_id
 from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.interfaces.telegram.constants import DEBUG_LOG_PATH, LOW_SIGNAL_REPLIES
@@ -99,6 +99,26 @@ async def stream_langgraph_reply_to_telegram(
         customer_id,
         len(str(text or "")),
     )
+
+    async def _recover_after_stream_timeout() -> str | None:
+        if not hasattr(agent_runtime, "ainvoke_text"):
+            return None
+        try:
+            recovered = await asyncio.wait_for(
+                agent_runtime.ainvoke_text(
+                    thread_id=thread_id,
+                    customer_id=customer_id,
+                    text=text,
+                ),
+                timeout=90.0,
+            )
+        except Exception:
+            return None
+        safe = str(recovered or "").strip()
+        if not safe or is_low_signal_reply(safe):
+            return None
+        return safe
+
     try:
         stream = agent_runtime.astream_text(
             thread_id=thread_id,
@@ -152,6 +172,27 @@ async def stream_langgraph_reply_to_telegram(
                     async with asyncio.timeout(1.0):
                         await stream.aclose()
                 stream_message_id = stream_state.get("message_id")
+                recovered_text = await _recover_after_stream_timeout()
+                if recovered_text:
+                    logger.warning(
+                        "telegram.stream timeout_recovered chat_id=%s thread_id=%s customer_id=%s stage=%s",
+                        chat_id,
+                        thread_id,
+                        customer_id,
+                        "first_token" if not last_streamed else "idle",
+                    )
+                    stream_message_id = (
+                        await client.upsert_stream_message(
+                            chat_id=chat_id,
+                            text=recovered_text,
+                            message_id=stream_message_id,
+                            parse_mode="HTML",
+                        )
+                        or stream_message_id
+                    )
+                    stream_state["message_id"] = stream_message_id
+                    final_reply = recovered_text
+                    break
                 timeout_text = (
                     "Still working, but the model response timed out. "
                     "Please retry in a moment."
