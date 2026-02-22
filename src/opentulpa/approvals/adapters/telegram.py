@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections import defaultdict
 from datetime import datetime
 
 from opentulpa.approvals.models import ApprovalRecord
@@ -15,6 +17,8 @@ class TelegramApprovalAdapter:
 
     def __init__(self, *, client: TelegramClient) -> None:
         self._client = client
+        self._lock = asyncio.Lock()
+        self._pending_by_chat: defaultdict[str, list[ApprovalRecord]] = defaultdict(list)
 
     @staticmethod
     def _format_expiry(expires_at: str) -> str:
@@ -51,12 +55,10 @@ class TelegramApprovalAdapter:
             preview = preview[: max_chars - 3].rstrip() + "..."
         return preview
 
-    async def send_challenge(self, approval: ApprovalRecord) -> bool:
-        chat_id = str(approval.origin_conversation_id or "").strip()
-        if not chat_id:
-            return False
-        expiry = self._format_expiry(approval.expires_at)
-        action_preview = self._action_preview(approval)
+    @classmethod
+    def _render_challenge(cls, approval: ApprovalRecord) -> tuple[str, dict[str, list[list[dict[str, str]]]]]:
+        expiry = cls._format_expiry(approval.expires_at)
+        action_preview = cls._action_preview(approval)
         text = (
             "Approval needed for external-impact action.\n\n"
             f"Action: {action_preview}\n"
@@ -73,9 +75,58 @@ class TelegramApprovalAdapter:
                 ]
             ]
         }
+        return text, reply_markup
+
+    async def send_challenge(self, approval: ApprovalRecord) -> bool:
+        chat_id = str(approval.origin_conversation_id or "").strip()
+        if not chat_id:
+            return False
+        text, reply_markup = self._render_challenge(approval)
         return await self._client.send_message(
             chat_id=chat_id,
             text=text,
             parse_mode="HTML",
             reply_markup=reply_markup,
         )
+
+    async def queue_challenge(self, approval: ApprovalRecord) -> bool:
+        chat_id = str(approval.origin_conversation_id or "").strip()
+        if not chat_id:
+            return False
+        async with self._lock:
+            self._pending_by_chat[chat_id].append(approval)
+        return True
+
+    async def flush_challenges(self, *, chat_id: str | int, limit: int | None = None) -> int:
+        chat_key = str(chat_id).strip()
+        if not chat_key:
+            return 0
+        safe_limit = max(1, int(limit)) if limit is not None else None
+        async with self._lock:
+            queued = list(self._pending_by_chat.get(chat_key) or [])
+            if not queued:
+                return 0
+            if safe_limit is not None:
+                to_send = queued[:safe_limit]
+                remaining = queued[safe_limit:]
+            else:
+                to_send = queued
+                remaining = []
+            if remaining:
+                self._pending_by_chat[chat_key] = remaining
+            else:
+                self._pending_by_chat.pop(chat_key, None)
+
+        delivered = 0
+        undelivered: list[ApprovalRecord] = []
+        for approval in to_send:
+            if await self.send_challenge(approval):
+                delivered += 1
+            else:
+                undelivered.append(approval)
+
+        if undelivered:
+            async with self._lock:
+                prior = self._pending_by_chat.get(chat_key) or []
+                self._pending_by_chat[chat_key] = [*undelivered, *prior]
+        return delivered

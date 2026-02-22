@@ -320,6 +320,7 @@ def create_app(
         settings=settings,
         get_telegram_client=get_telegram_client,
         get_telegram_chat=get_telegram_chat,
+        get_approvals=get_approvals,
         get_agent_runtime=get_agent_runtime,
         get_approval_execution_orchestrator=get_approval_execution_orchestrator,
         decide_approval_and_maybe_wake=decide_approval_and_maybe_wake,

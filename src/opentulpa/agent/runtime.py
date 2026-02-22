@@ -1579,6 +1579,7 @@ class OpenTulpaLangGraphRuntime:
                     "action_name": action_name,
                     "action_args": action_args if isinstance(action_args, dict) else {},
                     "action_note": str(action_note or "").strip()[:2000],
+                    "defer_challenge_delivery": True,
                 },
                 timeout=12.0,
                 retries=1,

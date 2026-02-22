@@ -22,6 +22,30 @@ class _CaptureAdapter:
         return True
 
 
+class _DeferredCaptureAdapter:
+    name = "capture"
+    interactive = True
+
+    def __init__(self) -> None:
+        self.sent: list[object] = []
+        self.queued: list[object] = []
+
+    async def send_challenge(self, approval) -> bool:  # type: ignore[no-untyped-def]
+        self.sent.append(approval)
+        return True
+
+    async def queue_challenge(self, approval) -> bool:  # type: ignore[no-untyped-def]
+        self.queued.append(approval)
+        return True
+
+    async def flush_challenges(self, *, chat_id: str) -> int:
+        _ = chat_id
+        count = len(self.queued)
+        self.sent.extend(self.queued)
+        self.queued = []
+        return count
+
+
 class _ClassifierRuntime:
     async def classify_guardrail_intent(
         self,
@@ -231,6 +255,37 @@ async def test_external_action_requires_approval_and_reuses_pending(
     assert first["approval_id"] == second["approval_id"]
     assert len(adapter.sent) == 1
     assert second.get("delivery_mode") == "existing_pending"
+
+
+@pytest.mark.asyncio
+async def test_external_action_can_defer_challenge_delivery(tmp_path: Path) -> None:
+    adapter = _DeferredCaptureAdapter()
+    broker = ApprovalBroker(
+        store=PendingApprovalStore(db_path=tmp_path / "approvals_defer.db"),
+        runtime=_ClassifierRuntime(),
+        adapters={"telegram": adapter},
+        origin_resolver=_origin_resolver,
+    )
+    result = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="chat-42",
+        action_name="slack_post",
+        action_args={"channel_id": "C123", "text": "hello"},
+        defer_challenge_delivery=True,
+    )
+
+    assert result["gate"] == "require_approval"
+    assert str(result.get("delivery_mode", "")).endswith("_deferred")
+    assert len(adapter.queued) == 1
+    assert len(adapter.sent) == 0
+
+    flushed = await broker.flush_deferred_challenges(
+        origin_interface="telegram",
+        origin_conversation_id="4242",
+    )
+    assert flushed == 1
+    assert len(adapter.queued) == 0
+    assert len(adapter.sent) == 1
 
 
 @pytest.mark.asyncio

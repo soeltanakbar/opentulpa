@@ -78,6 +78,7 @@ def register_approval_routes(
         thread_id = str(body.get("thread_id", "")).strip()
         action_name = str(body.get("action_name", "")).strip()
         action_args = body.get("action_args") if isinstance(body.get("action_args"), dict) else {}
+        defer_challenge_delivery = bool(body.get("defer_challenge_delivery", False))
         action_note = (
             str(body.get("action_note", "")).strip()
             or str(body.get("guardrail_note", "")).strip()
@@ -100,6 +101,7 @@ def register_approval_routes(
             origin_interface=origin_interface,
             origin_user_id=origin_user_id,
             origin_conversation_id=origin_conversation_id,
+            defer_challenge_delivery=defer_challenge_delivery,
         )
         return decision
 

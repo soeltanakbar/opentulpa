@@ -132,6 +132,7 @@ def register_telegram_webhook_routes(
     settings: Any,
     get_telegram_client: Callable[[], Any],
     get_telegram_chat: Callable[[], Any],
+    get_approvals: Callable[[], Any],
     get_agent_runtime: Callable[[], Any],
     get_approval_execution_orchestrator: Callable[[], Any],
     decide_approval_and_maybe_wake: Callable[..., Awaitable[dict[str, Any]]],
@@ -339,6 +340,11 @@ def register_telegram_webhook_routes(
                         text="I hit an internal error while processing your message. Please try again.",
                         parse_mode="HTML",
                     )
+                with suppress(Exception):
+                    await get_approvals().flush_deferred_challenges(
+                        origin_interface="telegram",
+                        origin_conversation_id=str(chat_id),
+                    )
             return
 
         if reply and chat_id is not None:
@@ -350,3 +356,10 @@ def register_telegram_webhook_routes(
                 )
             with suppress(Exception):
                 get_telegram_chat().touch_assistant_message(int(chat_id))
+
+        if chat_id is not None:
+            with suppress(Exception):
+                await get_approvals().flush_deferred_challenges(
+                    origin_interface="telegram",
+                    origin_conversation_id=str(chat_id),
+                )

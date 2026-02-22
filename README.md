@@ -8,7 +8,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
 [![Self-Hosted](https://img.shields.io/badge/self--hosted-yes-green.svg)]()
 
-OpenTulpa is a personal AI agent you run on your own server, accessible through Telegram.
+OpenTulpa is a personal AI agent you run on your own server, accessible through Telegram and a direct internal chat API.
 
 It does two things most assistants don't:
 
@@ -18,6 +18,19 @@ It does two things most assistants don't:
 The longer you run it, the more personal and capable it gets.
 
 > Two env vars. One command. A self-hosted agent that compounds over time.
+
+---
+
+## Cost Profile (Approximate)
+
+- Estimated cost per agentic loop: **~$0.011**
+- Most tasks complete in **~3-4 loops**
+- Estimated cost per task/message: **~$0.033-$0.044**
+- Estimated cost for **100 chat messages** (at 3-4 loops each): **~$3.30-$4.40 total**
+- Midpoint estimate (3.5 loops avg): **~$3.85**
+- These estimates assume the current default model mix: main runtime `gemini-3-flash-preview`, guardrail classifier `minimax/minimax-m2.5`, and wake classifier `gemini-3-flash-preview` unless `WAKE_CLASSIFIER_MODEL` is set.
+
+This makes the agent runtime inexpensive for day-to-day use, even with tool-driven multi-step reasoning.
 
 ---
 
@@ -99,9 +112,9 @@ OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 TELEGRAM_BOT_TOKEN=your_botfather_token
 ```
 
-Any OpenAI-compatible endpoint works — just swap the values above.
+Current runtime expects OpenRouter-compatible chat routing for the main agent path.
 
-**3. Start:**
+**3. Start (Telegram + webhook manager):**
 
 ```bash
 ./start.sh
@@ -111,6 +124,12 @@ Any OpenAI-compatible endpoint works — just swap the values above.
 - Start FastAPI on `:8000`
 - Launch a `cloudflared` tunnel
 - Auto-register the Telegram webhook at `<public_url>/webhook/telegram`
+
+If you only need API mode (no Telegram webhook), run:
+
+```bash
+uv run python -m opentulpa
+```
 
 **4. Webhook (if not using cloudflared):**
 
@@ -132,6 +151,20 @@ Create a daily 8:30am Gmail summary and post the top 5 action items here.
 - `http://localhost:8000/healthz`
 - `http://localhost:8000/agent/healthz`
 
+### Direct API turn (non-Telegram)
+
+You can run conversation turns directly through the internal chat route:
+
+```bash
+curl -s http://127.0.0.1:8000/internal/chat \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "customer_id":"test_user",
+    "thread_id":"chat-test_user",
+    "text":"Search the web for recent Pacific storms and summarize the risks."
+  }'
+```
+
 ---
 
 ## Skills
@@ -151,11 +184,16 @@ summary and outputs 3 concise follow-up drafts in my tone."
 
 ## Configuration
 
-**Required:**
+**Required (all modes):**
 
 | Variable | Purpose |
 |---|---|
 | `OPENROUTER_API_KEY` | LLM routing and embeddings |
+
+**Required for Telegram mode:**
+
+| Variable | Purpose |
+|---|---|
 | `TELEGRAM_BOT_TOKEN` | Telegram interface |
 
 **Optional:**
@@ -163,6 +201,9 @@ summary and outputs 3 concise follow-up drafts in my tone."
 | Variable | Purpose |
 |---|---|
 | `BROWSER_USE_API_KEY` | Browser automation (form filling, web flows) |
+| `SLACK_BOT_TOKEN` | Slack read/post integration tools |
+| `AGENT_BEHAVIOR_LOG_ENABLED` | Enable structured runtime behavior logging |
+| `AGENT_BEHAVIOR_LOG_PATH` | JSONL file path for behavior logs |
 
 **Core stack:** FastAPI · LangGraph · LangChain · mem0 · SQLite · APScheduler
 
@@ -181,6 +222,7 @@ summary and outputs 3 concise follow-up drafts in my tone."
 **Runtime data:**
 - `.opentulpa/` — memory, profiles, context
 - `tulpa_stuff/` — generated scripts and artifacts *(mostly gitignored)*
+- `.opentulpa/logs/agent_behavior.jsonl` — structured agent decision/execution trace
 
 ---
 
@@ -197,13 +239,19 @@ summary and outputs 3 concise follow-up drafts in my tone."
 
 ```
 src/opentulpa/
-├── agent/        # LangGraph runtime, graph, tool orchestration, context policy
-├── api/          # App composition and internal API routes
-├── interfaces/   # Telegram transport and streaming relay
-├── approvals/    # Guardrail policy, broker, adapters, persistence
-├── context/      # Profiles, memory events, file vault, rollups
-├── tasks/        # Sandboxed execution and task runner
-└── integrations/ # External service clients
+├── agent/         # LangGraph runtime, graph, tool orchestration, context policy
+├── api/           # FastAPI composition and internal routes
+├── application/   # Use-case orchestrators (turns, wakes, approval execution)
+├── approvals/     # Guardrail broker, adapters, persistence
+├── context/       # Profiles, event backlog, file vault, rollups
+├── domain/        # Domain contracts (conversation request/response)
+├── interfaces/    # Telegram transport and streaming relay
+├── integrations/  # External clients (web/slack/etc.)
+├── memory/        # mem0 integration layer
+├── policy/        # Approval intent/policy evaluation
+├── scheduler/     # Routine scheduling and persistence
+├── tasks/         # Task worker + sandbox execution
+└── tools/         # Local tool modules
 tulpa_stuff/      # Generated scripts and runtime artifacts
 ```
 
