@@ -13,7 +13,7 @@ OpenTulpa is a personal AI agent you run on your own server, accessible through 
 It does two things most assistants don't:
 
 - **It knows you.** It remembers facts you tell it, files you send it, preferences you express, and context from every past conversation — and uses all of that without being asked.
-- **It builds its own tools.** Describe an API workflow and it writes the integration, runs it, schedules it, and saves it. You never touch code.
+- **It builds its own tools and skills.** Describe what you want in chat, and it can write integrations, run them, schedule them, and save reusable skills to solve what you ask.
 
 The longer you run it, the more personal and capable it gets.
 
