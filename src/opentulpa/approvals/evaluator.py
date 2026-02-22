@@ -15,6 +15,35 @@ EXTERNAL_DEFAULT_ACTIONS: set[str] = {
 
 _SENSITIVE_KEY_PARTS = {"key", "token", "secret", "password", "authorization", "api"}
 _INTERNAL_CONTROL_ACTIONS = {"guardrail_execute_approved_action", "action_note"}
+_INTERNAL_SAFE_ACTIONS = {
+    "memory_search",
+    "memory_add",
+    "uploaded_file_search",
+    "uploaded_file_get",
+    "uploaded_file_send",
+    "uploaded_file_analyze",
+    "web_image_send",
+    "skill_list",
+    "skill_get",
+    "skill_upsert",
+    "skill_delete",
+    "directive_get",
+    "directive_set",
+    "directive_clear",
+    "time_profile_get",
+    "time_profile_set",
+    "routine_list",
+    "routine_delete",
+    "automation_delete",
+    "web_search",
+    "fetch_url_content",
+    "fetch_file_content",
+    "tulpa_write_file",
+    "tulpa_validate_file",
+    "tulpa_read_file",
+    "tulpa_catalog",
+    "server_time",
+}
 
 
 def _parse_impact(value: str, default: str = "write") -> str:
@@ -182,6 +211,38 @@ class ApprovalEvaluator:
                 impact_type="read",
                 summary=self.summarize_action(safe_action, action_args),
                 reason="internal_control_action",
+                confidence=1.0,
+                llm_gate="allow",
+                llm_uncertain=False,
+            )
+        if safe_action in _INTERNAL_SAFE_ACTIONS:
+            default_impact = "read"
+            if safe_action in {
+                "memory_add",
+                "skill_upsert",
+                "skill_delete",
+                "directive_set",
+                "directive_clear",
+                "time_profile_set",
+                "routine_delete",
+                "automation_delete",
+                "uploaded_file_send",
+                "web_image_send",
+                "tulpa_write_file",
+            }:
+                default_impact = "write"
+            return ActionIntent(
+                customer_id=str(customer_id or "").strip(),
+                thread_id=str(thread_id or "").strip(),
+                action_name=safe_action,
+                action_args=action_args if isinstance(action_args, dict) else {},
+                origin_interface=origin_interface,
+                origin_user_id=origin_user_id,
+                origin_conversation_id=origin_conversation_id,
+                recipient_scope="self",
+                impact_type=default_impact,  # type: ignore[arg-type]
+                summary=self.summarize_action(safe_action, action_args),
+                reason="internal_safe_action",
                 confidence=1.0,
                 llm_gate="allow",
                 llm_uncertain=False,

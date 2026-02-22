@@ -111,6 +111,27 @@ class _ClassifierRuntime:
         }
 
 
+class _ParanoidClassifierRuntime:
+    async def classify_guardrail_intent(
+        self,
+        *,
+        action_name: str,
+        action_args: dict[str, object],
+        action_note: str | None = None,
+    ) -> dict[str, object]:
+        _ = action_name
+        _ = action_args
+        _ = action_note
+        return {
+            "ok": True,
+            "gate": "require_approval",
+            "impact_type": "write",
+            "recipient_scope": "external",
+            "confidence": 0.95,
+            "reason": "paranoid-default",
+        }
+
+
 def _origin_resolver(customer_id: str, thread_id: str) -> dict[str, str]:
     assert customer_id
     assert thread_id
@@ -165,6 +186,27 @@ async def test_routine_delete_is_internal_no_approval(
         thread_id="chat-42",
         action_name="routine_delete",
         action_args={"routine_id": "rtn_abc", "customer_id": "telegram_42"},
+    )
+    assert result["gate"] == "allow"
+    assert result.get("approval_id") is None
+    assert len(adapter.sent) == 0
+
+
+@pytest.mark.asyncio
+async def test_skill_upsert_is_internal_no_approval_even_if_classifier_is_paranoid(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, adapter = broker_factory(runtime=_ParanoidClassifierRuntime())
+    result = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="chat-42",
+        action_name="skill_upsert",
+        action_args={
+            "customer_id": "telegram_42",
+            "name": "growth-skill",
+            "description": "desc",
+            "instructions": "search and summarize",
+        },
     )
     assert result["gate"] == "allow"
     assert result.get("approval_id") is None

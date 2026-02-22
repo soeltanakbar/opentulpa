@@ -1205,6 +1205,7 @@ class OpenTulpaLangGraphRuntime:
                 "confidence": 0.0,
                 "reason": "empty_assistant_text",
                 "repair_instruction": "",
+                "usable": True,
             }
         safe_user = str(user_text or "").strip()
         safe_turn_window = str(turn_window or "").strip()
@@ -1225,8 +1226,12 @@ class OpenTulpaLangGraphRuntime:
                             "reason (string <= 180 chars), repair_instruction (string <= 220 chars).\n"
                             "Decision policy (conservative, non-aggressive):\n"
                             "- applies=true only if assistant explicitly claims something was already done/launched/sent/posted/scheduled now.\n"
+                            "- applies=true if assistant commits to an immediate follow-up action in this same turn "
+                            "(e.g., 'doing this now', 'retrying now', 'give me a moment') that should produce tool evidence.\n"
                             "- If assistant is future-tense, conditional, or says approval is pending, set applies=false and mismatch=false.\n"
                             "- mismatch=true only when there is a clear immediate completion claim without matching success evidence in tool outputs.\n"
+                            "- mismatch=true when assistant commits immediate follow-up execution now but no matching tool evidence exists.\n"
+                            "- If assistant claims completed/updated/created/scheduled now AND also states approval is pending, set mismatch=true.\n"
                             "- If evidence is ambiguous/partial, prefer mismatch=false.\n"
                             "- If tool outputs show approval pending, denial, or tool error while assistant claims success now, mismatch=true.\n"
                             "- repair_instruction should tell the agent to either run the missing tool now or restate status honestly.\n"
@@ -1245,7 +1250,29 @@ class OpenTulpaLangGraphRuntime:
             )
             raw = response.content if hasattr(response, "content") else str(response)
             raw_text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
-            parsed = self._extract_json_object(raw_text) or {}
+            parsed = self._extract_json_object(raw_text)
+            if not isinstance(parsed, dict):
+                return {
+                    "ok": False,
+                    "applies": False,
+                    "mismatch": False,
+                    "confidence": 0.0,
+                    "reason": "invalid_checker_output:no_json_object",
+                    "repair_instruction": "",
+                    "usable": False,
+                }
+            required_keys = {"ok", "applies", "mismatch", "confidence", "reason", "repair_instruction"}
+            if not required_keys.issubset(parsed.keys()):
+                missing = ",".join(sorted(required_keys.difference(parsed.keys())))
+                return {
+                    "ok": False,
+                    "applies": False,
+                    "mismatch": False,
+                    "confidence": 0.0,
+                    "reason": f"invalid_checker_output:missing_keys:{missing}"[:180],
+                    "repair_instruction": "",
+                    "usable": False,
+                }
             applies = bool(parsed.get("applies", False))
             mismatch = bool(parsed.get("mismatch", False)) if applies else False
             try:
@@ -1259,6 +1286,7 @@ class OpenTulpaLangGraphRuntime:
                 "confidence": max(0.0, min(confidence, 1.0)),
                 "reason": str(parsed.get("reason", "")).strip()[:180],
                 "repair_instruction": str(parsed.get("repair_instruction", "")).strip()[:220],
+                "usable": True,
             }
         except Exception as exc:
             return {
@@ -1268,6 +1296,7 @@ class OpenTulpaLangGraphRuntime:
                 "confidence": 0.0,
                 "reason": f"classifier_error:{exc}",
                 "repair_instruction": "",
+                "usable": False,
             }
 
     async def classify_guardrail_intent(
@@ -1333,6 +1362,10 @@ class OpenTulpaLangGraphRuntime:
                             "default to gate=allow, impact_type=read, recipient_scope=self.\n"
                             "- Internal system management (routine_delete, automation_delete, routine_list, "
                             "uploaded_file_search/get/analyze, local context/memory reads) should be allow.\n"
+                            "- skill_upsert/skill_delete are local configuration updates (internal only) and "
+                            "should default to gate=allow unless the action itself directly posts/sends externally.\n"
+                            "- directive_set/directive_clear/time_profile_set are internal profile updates and "
+                            "should default to gate=allow.\n"
                             "- For routine_create:\n"
                             "  * If the routine can cause external side effects (posting/sending/mutating external services), "
                             "set gate=require_approval.\n"

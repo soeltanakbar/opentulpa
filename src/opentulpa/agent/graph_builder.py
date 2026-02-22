@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import RetryPolicy
 
-from opentulpa.agent.lc_messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
+from opentulpa.agent.lc_messages import (
+    AIMessage,
+    AnyMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from opentulpa.agent.models import AgentState
+from opentulpa.agent.utils import (
+    approx_tokens as _approx_tokens,
+)
 from opentulpa.agent.utils import (
     content_to_text as _content_to_text,
 )
@@ -24,6 +34,9 @@ from opentulpa.agent.utils import (
 )
 from opentulpa.agent.utils import (
     looks_like_shell_command as _looks_like_shell_command,
+)
+from opentulpa.agent.utils import (
+    message_to_text as _message_to_text,
 )
 from opentulpa.agent.utils import (
     safe_json as _safe_json,
@@ -131,6 +144,8 @@ def build_runtime_graph(runtime: Any):
             "scheduling periodic polling jobs, and producing change summaries/alerts from API or web data. "
             "If a tool returns APPROVAL_PENDING with an approval_id, ask the user to approve it and then call "
             "guardrail_execute_approved_action with that approval_id. "
+            "When a tool returns APPROVAL_PENDING, describe it as pending/requested only. "
+            "Never say an action was already created/updated/deleted/executed in that same message. "
             "Before any potentially side-effecting action (especially external posts/sends, terminal/browser mutations, "
             "or routine_create for external automations), call action_note first with concise reasoning "
             "about what you will do next. "
@@ -225,10 +240,17 @@ def build_runtime_graph(runtime: Any):
             )
         if link_alias_context:
             prompt_messages.append(SystemMessage(content=link_alias_context))
+        prompt_budget = max(10000, int(getattr(runtime, "_context_token_limit", 30000)))
+        prompt_overhead_tokens = sum(
+            _approx_tokens(_content_to_text(getattr(msg, "content", "")))
+            for msg in prompt_messages
+        )
+        history_budget = max(1200, prompt_budget - prompt_overhead_tokens)
+        bounded_messages = _tail_messages_to_token_budget(messages, token_budget=history_budget)
         response = await runtime._model_with_tools.ainvoke(
             [
                 *prompt_messages,
-                *messages,
+                *bounded_messages,
             ]
         )
         update: dict[str, Any] = {"messages": [response]}
@@ -443,6 +465,45 @@ def build_runtime_graph(runtime: Any):
             parts.append(chunk)
         return "\n".join(parts)
 
+    def _trim_text_to_token_budget(text: str, *, token_budget: int) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        budget = max(1, int(token_budget))
+        if _approx_tokens(raw) <= budget:
+            return raw
+        max_chars = max(800, budget * 4)
+        if len(raw) <= max_chars:
+            return raw
+        reserve = max(64, max_chars // 2 - 8)
+        compact = f"{raw[:reserve]}\n...\n{raw[-reserve:]}"
+        while _approx_tokens(compact) > budget and reserve > 64:
+            reserve = max(64, int(reserve * 0.85))
+            compact = f"{raw[:reserve]}\n...\n{raw[-reserve:]}"
+        return compact.strip()
+
+    def _tail_messages_to_token_budget(
+        all_messages: list[AnyMessage],
+        *,
+        token_budget: int,
+    ) -> list[AnyMessage]:
+        if not all_messages:
+            return []
+        budget = max(200, int(token_budget))
+        kept_rev: list[AnyMessage] = []
+        used = 0
+        for msg in reversed(all_messages):
+            text = _message_to_text(msg)
+            tok = max(1, _approx_tokens(text))
+            if kept_rev and used + tok > budget:
+                break
+            kept_rev.append(msg)
+            used += tok
+            if used >= budget:
+                break
+        kept_rev.reverse()
+        return kept_rev
+
     async def claim_check_node(state: AgentState) -> dict[str, Any]:
         messages = state.get("messages", [])
         if not messages:
@@ -452,12 +513,25 @@ def build_runtime_graph(runtime: Any):
             return {"claim_check_needs_retry": False}
 
         retry_count = int(state.get("claim_check_retry_count", 0))
-        if retry_count >= 1:
-            return {"claim_check_needs_retry": False}
+        max_claim_check_retries = 3
 
         assistant_text = _content_to_text(getattr(last, "content", "")).strip()
         if not assistant_text:
-            return {"claim_check_needs_retry": False}
+            if retry_count >= max_claim_check_retries:
+                return {"claim_check_needs_retry": False}
+            return {
+                "messages": [
+                    SystemMessage(
+                        content=(
+                            "SELF_CHECK_EMPTY_OUTPUT: Your previous response produced no visible output. "
+                            "Continue and provide a concrete answer or execute the needed tools now. "
+                            "Do not stop silently."
+                        )
+                    )
+                ],
+                "claim_check_needs_retry": True,
+                "claim_check_retry_count": retry_count + 1,
+            }
 
         turn_messages = _latest_turn_messages(messages)
         if not turn_messages:
@@ -465,18 +539,50 @@ def build_runtime_graph(runtime: Any):
         user_text = _content_to_text(getattr(turn_messages[0], "content", "")).strip()
         recent_tool_outputs = _collect_recent_tool_outputs(turn_messages)
         turn_window = _serialize_turn_window(turn_messages)
+        tool_budget = max(
+            300,
+            min(3000, int(getattr(runtime, "_context_short_term_low_tokens", 10000) * 0.25)),
+        )
+        recent_tool_outputs = [
+            _trim_text_to_token_budget(x, token_budget=tool_budget)
+            for x in recent_tool_outputs[-8:]
+        ]
+        turn_window_budget = max(
+            1200,
+            min(6000, int(getattr(runtime, "_context_short_term_low_tokens", 10000) * 0.6)),
+        )
+        turn_window = _trim_text_to_token_budget(turn_window, token_budget=turn_window_budget)
         verdict = await runtime.verify_completion_claim(
             user_text=user_text,
             assistant_text=assistant_text,
             recent_tool_outputs=recent_tool_outputs,
             turn_window=turn_window,
         )
+        if not bool(verdict.get("usable", True)):
+            if retry_count >= max_claim_check_retries:
+                return {"claim_check_needs_retry": False}
+            backoff_seconds = min(1.6, 0.2 * (2**retry_count))
+            await asyncio.sleep(backoff_seconds)
+            reason = str(verdict.get("reason", "")).strip()[:180]
+            note = (
+                "SELF_CHECK_UNAVAILABLE: Claim checker returned an unusable decision. "
+                "Continue the turn and either execute the needed tool action now or restate status clearly."
+            )
+            if reason:
+                note += f" Reason={reason}."
+            return {
+                "messages": [SystemMessage(content=note)],
+                "claim_check_needs_retry": True,
+                "claim_check_retry_count": retry_count + 1,
+            }
         mismatch = bool(verdict.get("mismatch", False))
         if not mismatch:
             return {
                 "claim_check_needs_retry": False,
                 "claim_check_retry_count": 0,
             }
+        if retry_count >= max_claim_check_retries:
+            return {"claim_check_needs_retry": False}
 
         reason = str(verdict.get("reason", "")).strip()[:180]
         repair = str(verdict.get("repair_instruction", "")).strip()[:220]
