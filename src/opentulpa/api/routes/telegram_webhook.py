@@ -122,13 +122,12 @@ async def _execute_approved_action_and_summarize(
                     f"failure_result={payload_preview}\n\n"
                     "Instructions:\n"
                     "1) Retry/fix on your own using tools.\n"
-                    "2) Work within a maximum of 10 internal tool steps.\n"
-                    "3) If resolved, report final success + deliverable.\n"
-                    "4) If not resolved within step budget, report what you tried and ask user whether to continue.\n"
+                    "2) If resolved, report final success + deliverable.\n"
+                    "3) If still unresolved after substantial attempts, report what you tried and ask user whether to continue.\n"
                     "Do not leak internal JSON or system internals."
                 ),
                 include_pending_context=False,
-                recursion_limit_override=10,
+                recursion_limit_override=48,
             )
             recovered = str(recovery_text or "").strip()
             if recovered:

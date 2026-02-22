@@ -187,7 +187,8 @@ async def test_external_action_requires_approval_and_reuses_pending(
     assert first["gate"] == "require_approval"
     assert second["gate"] == "require_approval"
     assert first["approval_id"] == second["approval_id"]
-    assert len(adapter.sent) == 2
+    assert len(adapter.sent) == 1
+    assert second.get("delivery_mode") == "existing_pending"
 
 
 @pytest.mark.asyncio

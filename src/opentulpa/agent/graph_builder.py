@@ -8,8 +8,11 @@ from typing import Any, Literal
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import RetryPolicy
 
-from opentulpa.agent.lc_messages import AIMessage, AnyMessage, SystemMessage, ToolMessage
+from opentulpa.agent.lc_messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.models import AgentState
+from opentulpa.agent.utils import (
+    content_to_text as _content_to_text,
+)
 from opentulpa.agent.utils import (
     extract_relative_delay_minutes as _extract_relative_delay_minutes,
 )
@@ -401,14 +404,105 @@ def build_runtime_graph(runtime: Any):
             update["last_tool_error"] = "tool execution failed"
         return update
 
-    def route_after_agent(state: AgentState) -> Literal["validate_tools", END]:
+    def _latest_turn_messages(messages: list[AnyMessage]) -> list[AnyMessage]:
+        if not messages:
+            return []
+        start = 0
+        for idx in range(len(messages) - 1, -1, -1):
+            if isinstance(messages[idx], HumanMessage):
+                start = idx
+                break
+        return messages[start:]
+
+    def _collect_recent_tool_outputs(turn_messages: list[AnyMessage]) -> list[str]:
+        if not turn_messages:
+            return []
+        outputs: list[str] = []
+        for msg in turn_messages:
+            if isinstance(msg, ToolMessage):
+                text = _content_to_text(getattr(msg, "content", "")).strip()
+                if text:
+                    outputs.append(text)
+        return outputs
+
+    def _serialize_turn_window(turn_messages: list[AnyMessage]) -> str:
+        parts: list[str] = []
+        for msg in turn_messages:
+            if isinstance(msg, HumanMessage):
+                role = "user"
+            elif isinstance(msg, AIMessage):
+                role = "assistant"
+            elif isinstance(msg, ToolMessage):
+                role = "tool"
+            else:
+                continue
+            text = _content_to_text(getattr(msg, "content", "")).strip()
+            if not text:
+                continue
+            chunk = f"[{role}] {text}"
+            parts.append(chunk)
+        return "\n".join(parts)
+
+    async def claim_check_node(state: AgentState) -> dict[str, Any]:
         messages = state.get("messages", [])
         if not messages:
-            return END
+            return {"claim_check_needs_retry": False}
+        last = messages[-1]
+        if not isinstance(last, AIMessage) or last.tool_calls:
+            return {"claim_check_needs_retry": False}
+
+        retry_count = int(state.get("claim_check_retry_count", 0))
+        if retry_count >= 1:
+            return {"claim_check_needs_retry": False}
+
+        assistant_text = _content_to_text(getattr(last, "content", "")).strip()
+        if not assistant_text:
+            return {"claim_check_needs_retry": False}
+
+        turn_messages = _latest_turn_messages(messages)
+        if not turn_messages:
+            return {"claim_check_needs_retry": False}
+        user_text = _content_to_text(getattr(turn_messages[0], "content", "")).strip()
+        recent_tool_outputs = _collect_recent_tool_outputs(turn_messages)
+        turn_window = _serialize_turn_window(turn_messages)
+        verdict = await runtime.verify_completion_claim(
+            user_text=user_text,
+            assistant_text=assistant_text,
+            recent_tool_outputs=recent_tool_outputs,
+            turn_window=turn_window,
+        )
+        mismatch = bool(verdict.get("mismatch", False))
+        if not mismatch:
+            return {
+                "claim_check_needs_retry": False,
+                "claim_check_retry_count": 0,
+            }
+
+        reason = str(verdict.get("reason", "")).strip()[:180]
+        repair = str(verdict.get("repair_instruction", "")).strip()[:220]
+        note = (
+            "SELF_CHECK_FAILED: Your last reply likely claimed an immediate action was done "
+            "without confirmed tool evidence in this turn. "
+            "Do not repeat the claim. Either execute the required tool now or state pending status clearly."
+        )
+        if reason:
+            note += f" Reason={reason}."
+        if repair:
+            note += f" Fix={repair}."
+        return {
+            "messages": [SystemMessage(content=note)],
+            "claim_check_needs_retry": True,
+            "claim_check_retry_count": retry_count + 1,
+        }
+
+    def route_after_agent(state: AgentState) -> Literal["validate_tools", "claim_check"]:
+        messages = state.get("messages", [])
+        if not messages:
+            return "claim_check"
         last = messages[-1]
         if isinstance(last, AIMessage) and last.tool_calls:
             return "validate_tools"
-        return END
+        return "claim_check"
 
     async def guardrail_precheck_node(state: AgentState) -> dict[str, Any]:
         messages = state.get("messages", [])
@@ -541,12 +635,22 @@ def build_runtime_graph(runtime: Any):
             approval_id = str(result.get("approval_id", "")).strip()
             summary = str(result.get("summary", f"execute {call_name}")).strip()
             reason = str(result.get("reason", "approval_required")).strip()
+            delivery_mode = str(result.get("delivery_mode", "")).strip()
             if approval_id:
-                content = (
-                    "APPROVAL_PENDING: This action is blocked until user approval. "
-                    f"approval_id={approval_id}; summary={summary}; reason={reason}. "
-                    "After approval, call guardrail_execute_approved_action with this approval_id."
-                )
+                if delivery_mode:
+                    content = (
+                        "APPROVAL_PENDING: This action is blocked until user approval. "
+                        f"approval_id={approval_id}; summary={summary}; reason={reason}. "
+                        "After approval, call guardrail_execute_approved_action with this approval_id."
+                    )
+                else:
+                    content = (
+                        "APPROVAL_PENDING: This action is blocked until user approval, but no push prompt "
+                        "was delivered automatically. "
+                        f"approval_id={approval_id}; summary={summary}; reason={reason}. "
+                        f"Ask the user to approve manually with /approve {approval_id} (or deny with /deny {approval_id}). "
+                        "After approval, call guardrail_execute_approved_action with this approval_id."
+                    )
             else:
                 if reason.startswith("already_executed_recent_"):
                     content = (
@@ -587,6 +691,11 @@ def build_runtime_graph(runtime: Any):
             return "tools"
         return "agent"
 
+    def route_after_claim_check(state: AgentState) -> Literal["agent", END]:
+        if bool(state.get("claim_check_needs_retry", False)):
+            return "agent"
+        return END
+
     builder = StateGraph(AgentState)
     builder.add_node("agent", agent_node, retry_policy=RetryPolicy(max_attempts=3))
     builder.add_node(
@@ -600,11 +709,13 @@ def build_runtime_graph(runtime: Any):
         retry_policy=RetryPolicy(max_attempts=2),
     )
     builder.add_node("tools", tools_node, retry_policy=RetryPolicy(max_attempts=2))
+    builder.add_node("claim_check", claim_check_node, retry_policy=RetryPolicy(max_attempts=2))
     builder.add_edge(START, "agent")
-    builder.add_conditional_edges("agent", route_after_agent, ["validate_tools", END])
+    builder.add_conditional_edges("agent", route_after_agent, ["validate_tools", "claim_check"])
     builder.add_conditional_edges(
         "validate_tools", route_after_validate, ["guardrail_precheck", "agent"]
     )
     builder.add_conditional_edges("guardrail_precheck", route_after_guardrail, ["tools", "agent"])
     builder.add_edge("tools", "agent")
+    builder.add_conditional_edges("claim_check", route_after_claim_check, ["agent", END])
     return builder.compile(checkpointer=runtime._checkpointer)
