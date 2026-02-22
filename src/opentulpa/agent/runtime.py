@@ -914,7 +914,7 @@ class OpenTulpaLangGraphRuntime:
                 user_text=merged_text,
             )
             effective_recursion_limit = (
-                max(5, min(int(recursion_limit_override), 64))
+                max(5, min(int(recursion_limit_override), 200))
                 if recursion_limit_override is not None
                 else self.recursion_limit
             )
@@ -928,6 +928,8 @@ class OpenTulpaLangGraphRuntime:
                     "customer_id": customer_id,
                     "thread_id": thread_id,
                     "tool_error_count": 0,
+                    "claim_check_retry_count": 0,
+                    "claim_check_needs_retry": False,
                     **skill_state,
                 },
                 config=config,
@@ -1042,6 +1044,8 @@ class OpenTulpaLangGraphRuntime:
                     "customer_id": customer_id,
                     "thread_id": thread_id,
                     "tool_error_count": 0,
+                    "claim_check_retry_count": 0,
+                    "claim_check_needs_retry": False,
                     **skill_state,
                 },
                 config=config,
@@ -1093,6 +1097,8 @@ class OpenTulpaLangGraphRuntime:
                         "customer_id": customer_id,
                         "thread_id": thread_id,
                         "tool_error_count": 0,
+                        "claim_check_retry_count": 0,
+                        "claim_check_needs_retry": False,
                         **skill_state,
                     },
                     config=config,
@@ -1177,6 +1183,93 @@ class OpenTulpaLangGraphRuntime:
         except Exception as exc:
             return {"notify_user": False, "reason": f"classifier_error:{exc}"}
 
+    async def verify_completion_claim(
+        self,
+        *,
+        user_text: str,
+        assistant_text: str,
+        recent_tool_outputs: list[str],
+        turn_window: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Verify that immediate-action completion claims are supported by tool evidence.
+
+        This check is intentionally conservative: on uncertainty it should not force a retry.
+        """
+        safe_assistant = str(assistant_text or "").strip()
+        if not safe_assistant:
+            return {
+                "ok": True,
+                "applies": False,
+                "mismatch": False,
+                "confidence": 0.0,
+                "reason": "empty_assistant_text",
+                "repair_instruction": "",
+            }
+        safe_user = str(user_text or "").strip()
+        safe_turn_window = str(turn_window or "").strip()
+        safe_tools: list[str] = []
+        for raw in (recent_tool_outputs or []):
+            text = " ".join(str(raw or "").split()).strip()
+            if text:
+                safe_tools.append(text)
+
+        try:
+            response = await self._guardrail_classifier_model.ainvoke(
+                [
+                    SystemMessage(
+                        content=(
+                            "You verify assistant execution claims against tool evidence.\n"
+                            "Return strict JSON only with keys:\n"
+                            "ok (bool), applies (bool), mismatch (bool), confidence (0..1), "
+                            "reason (string <= 180 chars), repair_instruction (string <= 220 chars).\n"
+                            "Decision policy (conservative, non-aggressive):\n"
+                            "- applies=true only if assistant explicitly claims something was already done/launched/sent/posted/scheduled now.\n"
+                            "- If assistant is future-tense, conditional, or says approval is pending, set applies=false and mismatch=false.\n"
+                            "- mismatch=true only when there is a clear immediate completion claim without matching success evidence in tool outputs.\n"
+                            "- If evidence is ambiguous/partial, prefer mismatch=false.\n"
+                            "- If tool outputs show approval pending, denial, or tool error while assistant claims success now, mismatch=true.\n"
+                            "- repair_instruction should tell the agent to either run the missing tool now or restate status honestly.\n"
+                            "No markdown. No extra keys."
+                        )
+                    ),
+                    HumanMessage(
+                        content=(
+                            f"user_message={safe_user}\n"
+                            f"assistant_message={safe_assistant}\n"
+                            f"turn_window={safe_turn_window}\n"
+                            f"recent_tool_outputs={json.dumps(safe_tools, ensure_ascii=False)}"
+                        )
+                    ),
+                ]
+            )
+            raw = response.content if hasattr(response, "content") else str(response)
+            raw_text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+            parsed = self._extract_json_object(raw_text) or {}
+            applies = bool(parsed.get("applies", False))
+            mismatch = bool(parsed.get("mismatch", False)) if applies else False
+            try:
+                confidence = float(parsed.get("confidence", 0.0))
+            except Exception:
+                confidence = 0.0
+            return {
+                "ok": bool(parsed.get("ok", True)),
+                "applies": applies,
+                "mismatch": mismatch,
+                "confidence": max(0.0, min(confidence, 1.0)),
+                "reason": str(parsed.get("reason", "")).strip()[:180],
+                "repair_instruction": str(parsed.get("repair_instruction", "")).strip()[:220],
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "applies": False,
+                "mismatch": False,
+                "confidence": 0.0,
+                "reason": f"classifier_error:{exc}",
+                "repair_instruction": "",
+            }
+
     async def classify_guardrail_intent(
         self,
         *,
@@ -1240,6 +1333,11 @@ class OpenTulpaLangGraphRuntime:
                             "default to gate=allow, impact_type=read, recipient_scope=self.\n"
                             "- Internal system management (routine_delete, automation_delete, routine_list, "
                             "uploaded_file_search/get/analyze, local context/memory reads) should be allow.\n"
+                            "- For routine_create:\n"
+                            "  * If the routine can cause external side effects (posting/sending/mutating external services), "
+                            "set gate=require_approval.\n"
+                            "  * If the routine is internal-only (research, summarization, reminders/check-ins to the same user), "
+                            "set gate=allow.\n"
                             "- Use require_approval only for actions that can affect external systems/accounts/users "
                             "(posting, sending, purchasing, mutating external services) or when uncertainty is high.\n"
                             "- If uncertain between allow vs require_approval, prefer require_approval only when "

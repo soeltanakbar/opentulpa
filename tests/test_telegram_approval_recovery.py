@@ -74,4 +74,4 @@ async def test_failed_approved_action_uses_autonomous_recovery_message() -> None
     assert "auth link" in out.lower()
     ainvoke_calls = [c for c in runtime.calls if c.get("kind") == "ainvoke"]
     assert len(ainvoke_calls) == 1
-    assert ainvoke_calls[0].get("recursion_limit_override") == 10
+    assert ainvoke_calls[0].get("recursion_limit_override") == 48

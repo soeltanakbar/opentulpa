@@ -24,3 +24,5 @@ class AgentState(TypedDict, total=False):
     action_notes_by_action: dict[str, str]
     tool_error_count: int
     last_tool_error: str
+    claim_check_needs_retry: bool
+    claim_check_retry_count: int

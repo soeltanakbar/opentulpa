@@ -23,7 +23,7 @@ class Settings(BaseSettings):
         description="SQLite path for LangGraph thread checkpoints.",
     )
     agent_recursion_limit: int = Field(
-        default=30,
+        default=80,
         ge=5,
         le=200,
         description="Maximum LangGraph steps per turn.",

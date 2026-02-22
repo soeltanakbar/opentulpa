@@ -403,7 +403,7 @@ async def relay_event_via_main_agent(
                 customer_id=customer_id,
                 text=instruction,
                 include_pending_context=False,
-                recursion_limit_override=12 if proactive_heartbeat else None,
+                recursion_limit_override=36 if proactive_heartbeat else None,
             )
             safe = str(text or "").strip()
             if not safe:

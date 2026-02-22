@@ -145,11 +145,11 @@ class ApprovalBroker:
             action_args_json=args_json,
         )
         if duplicate is not None:
-            delivery_mode = await self._deliver_challenge(duplicate)
             decision.approval_id = duplicate.id
             decision.status = duplicate.status
             decision.expires_at = duplicate.expires_at
-            decision.delivery_mode = delivery_mode
+            # Reuse existing pending approval without sending duplicate prompts.
+            decision.delivery_mode = "existing_pending"
             return self._evaluator.as_dict(decision)
 
         # Reuse recent non-pending decisions for exact same action intent.
@@ -189,11 +189,11 @@ class ApprovalBroker:
             )
             if recent_browser is not None:
                 if recent_browser.status == "pending":
-                    delivery_mode = await self._deliver_challenge(recent_browser)
                     decision.approval_id = recent_browser.id
                     decision.status = recent_browser.status
                     decision.expires_at = recent_browser.expires_at
-                    decision.delivery_mode = delivery_mode
+                    # Reuse existing pending approval without sending duplicate prompts.
+                    decision.delivery_mode = "existing_pending"
                     return self._evaluator.as_dict(decision)
                 if recent_browser.status == "approved":
                     decision.gate = "allow"
