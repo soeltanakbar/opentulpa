@@ -21,19 +21,6 @@ The longer you run it, the more personal and capable it gets.
 
 ---
 
-## Cost Profile (Approximate)
-
-- Estimated cost per agentic loop: **~$0.011**
-- Most tasks complete in **~3-4 loops**
-- Estimated cost per task/message: **~$0.033-$0.044**
-- Estimated cost for **100 chat messages** (at 3-4 loops each): **~$3.30-$4.40 total**
-- Midpoint estimate (3.5 loops avg): **~$3.85**
-- These estimates assume the current default model mix: main runtime `gemini-3-flash-preview`, guardrail classifier `minimax/minimax-m2.5`, and wake classifier `gemini-3-flash-preview` unless `WAKE_CLASSIFIER_MODEL` is set.
-
-This makes the agent runtime inexpensive for day-to-day use, even with tool-driven multi-step reasoning.
-
----
-
 ## What It Can Do
 
 ### It Learns Who You Are
@@ -81,6 +68,19 @@ If there's a public API or a service with documentation, OpenTulpa can integrate
 - **Background automation:** scheduled tasks, recurring jobs, long-running routines.
 - **Artifact storage:** generated scripts and outputs are saved and reused across sessions.
 - **Skills:** recurring workflows become named capabilities it maintains, loads and applies automatically.
+
+---
+
+## Cost Profile (Approximate)
+
+- Estimated cost per agentic loop: **~$0.011**
+- Most tasks complete in **~3-4 loops**
+- Estimated cost per task/message: **~$0.033-$0.044**
+- Estimated cost for **100 chat messages** (at 3-4 loops each): **~$3.30-$4.40 total**
+- Midpoint estimate (3.5 loops avg): **~$3.85**
+- These estimates assume the current default model mix: main runtime `gemini-3-flash-preview`, guardrail classifier `minimax/minimax-m2.5`, and wake classifier `gemini-3-flash-preview` unless `WAKE_CLASSIFIER_MODEL` is set.
+
+This makes the agent runtime inexpensive for day-to-day use, even with tool-driven multi-step reasoning.
 
 ---
 
