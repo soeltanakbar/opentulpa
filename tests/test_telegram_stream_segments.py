@@ -21,6 +21,7 @@ class _FakeTelegramClient:
         self.bot_token = bot_token
         self.calls: list[tuple[int | str, str, int | None, str | None]] = []
         self._next_id = 100
+        self.chat_actions: list[tuple[int | str, str]] = []
 
     async def upsert_stream_message(
         self,
@@ -37,6 +38,15 @@ class _FakeTelegramClient:
             self._next_id += 1
             return self._next_id
         return message_id
+
+    async def send_chat_action(
+        self,
+        *,
+        chat_id: int | str,
+        action: str = "typing",
+    ) -> bool:
+        self.chat_actions.append((chat_id, action))
+        return True
 
 
 @pytest.mark.asyncio
@@ -58,13 +68,8 @@ async def test_stream_creates_new_message_for_new_meaningful_segment(
     assert suppressed is False
     assert "priority emails" in str(final or "").lower()
 
-    meaningful = [
-        call
-        for call in fake_client.calls
-        if call[1] not in {"...", "..", "."}
-    ]
-    assert len(meaningful) >= 2
-    # meaningful segments should not be forced into a single edited message
-    first_msg_id = meaningful[0][2]
-    second_msg_id = meaningful[-1][2]
-    assert first_msg_id != second_msg_id
+    assert len(fake_client.calls) >= 2
+    # New semantic segments should start a fresh message (message_id=None send path).
+    assert fake_client.calls[0][2] is None
+    assert fake_client.calls[-1][2] is None
+    assert fake_client.chat_actions
