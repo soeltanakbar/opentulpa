@@ -136,6 +136,8 @@ def build_runtime_graph(runtime: Any):
             "for the selected file and only state it was sent after a successful tool result. "
             "Use known link aliases (link_*) for very long URLs to reduce copy errors. "
             "If you output a known alias ID, it will be expanded to full URL for the user. "
+            "When users share important links/files/IDs they may need later, proactively call memory_add and store exact URL/file name/file_id/path values. "
+            "Files uploaded by users are persisted in the file vault (with summary/description); use uploaded_file_search/uploaded_file_get to retrieve records and memory_add exact file name/file_id/path when the user may need recall later. "
             "When you are unsure about prior user-specific facts/preferences/IDs because they are not in short-term context, "
             "call memory_search before asking the user to repeat themselves. "
             "Credential/token recovery policy: before asking users for keys, secrets, tokens, client files, or auth codes, "

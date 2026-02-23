@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -143,10 +144,15 @@ def register_telegram_webhook_routes(
     async def telegram_webhook(request: Request, background_tasks: BackgroundTasks) -> Response:
         if not settings.telegram_bot_token:
             return JSONResponse(status_code=501, content={"detail": "Telegram not configured"})
-        if settings.telegram_webhook_secret:
-            incoming_secret = request.headers.get("x-telegram-bot-api-secret-token", "")
-            if incoming_secret != settings.telegram_webhook_secret:
-                return JSONResponse(status_code=403, content={"detail": "invalid telegram secret"})
+        expected_secret = str(settings.telegram_webhook_secret or "").strip()
+        if not expected_secret:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "telegram webhook secret not configured"},
+            )
+        incoming_secret = str(request.headers.get("x-telegram-bot-api-secret-token", "") or "").strip()
+        if not hmac.compare_digest(incoming_secret, expected_secret):
+            return JSONResponse(status_code=403, content={"detail": "invalid telegram secret"})
         body = await request.json()
 
         # Immediate 200 OK, logic runs in background.

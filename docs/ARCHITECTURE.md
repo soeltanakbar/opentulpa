@@ -89,6 +89,17 @@ Compaction is hysteresis-based: compact at high watermark, then reduce toward lo
 - Telegram approvals are currently delivered with deferred queue/flush so approval bubbles appear after the assistant message in that turn.
 - State machine: `pending -> approved|denied|expired`, and `approved -> executed` (single-use).
 
+## Internal API boundary
+
+- `/webhook/*` is the public webhook ingress surface (Telegram and future integrations).
+- Public internet clients are denied for all non-webhook routes.
+- `/webhook/telegram` requires Telegram secret header auth
+  (`x-telegram-bot-api-secret-token`).
+- `/internal/*` routes are intended for server-local traffic only
+  (`localhost`/private network).
+- `scripts/manager.py` auto-generates `TELEGRAM_WEBHOOK_SECRET` for tunnel runs
+  when not provided.
+
 ## Runtime data stores
 
 - LangGraph checkpoints: `.opentulpa/langgraph_checkpoints.sqlite`
