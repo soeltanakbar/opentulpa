@@ -280,7 +280,7 @@ summary and outputs 3 concise follow-up drafts in my tone."
 
 - External-impact actions (writes, sends, posts) require explicit per-action approval — single-use, expiring, scoped to the requesting user only.
 - Telegram webhook requests can be verified with `TELEGRAM_WEBHOOK_SECRET`.
-- Public internet requests are denied for all routes except `/webhook/*`.
+- Public internet requests are denied for all routes except `/webhook/*` and health checks (`/healthz`, `/agent/healthz`).
 - `/webhook/telegram` requires Telegram secret auth (`x-telegram-bot-api-secret-token`).
 - `/internal/*` is intended for server-local traffic only (`localhost`/private network).
 - No built-in telemetry or user-tracking pipeline.
