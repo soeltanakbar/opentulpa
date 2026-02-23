@@ -261,14 +261,11 @@ class OpenTulpaLangGraphRuntime:
         with suppress(Exception):
             path.parent.mkdir(parents=True, exist_ok=True)
         if lock is None:
-            with suppress(Exception):
-                with path.open("a", encoding="utf-8") as f:
-                    f.write(serialized + "\n")
+            with suppress(Exception), path.open("a", encoding="utf-8") as f:
+                f.write(serialized + "\n")
             return
-        with suppress(Exception):
-            with lock:
-                with path.open("a", encoding="utf-8") as f:
-                    f.write(serialized + "\n")
+        with suppress(Exception), lock, path.open("a", encoding="utf-8") as f:
+            f.write(serialized + "\n")
 
     @staticmethod
     def _extract_json_object(text: str) -> dict[str, Any] | None:

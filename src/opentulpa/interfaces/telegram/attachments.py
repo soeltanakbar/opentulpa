@@ -146,7 +146,10 @@ async def ingest_attachments(
                         memory.add_text(
                             (
                                 "User sent voice message: "
-                                f"id={record.get('id')} transcript={str(record.get('voice_transcript', ''))[:1200]}"
+                                f"id={record.get('id')} "
+                                f"name={record.get('original_filename')} "
+                                f"path={record.get('stored_path')} "
+                                f"transcript={str(record.get('voice_transcript', ''))[:1200]}"
                             ),
                             user_id=customer_id,
                             metadata={
@@ -175,7 +178,8 @@ async def ingest_attachments(
                     (
                         "User uploaded file stored in vault: "
                         f"id={record.get('id')} name={record.get('original_filename')} "
-                        f"kind={record.get('kind')} summary={record.get('summary', '')[:1200]}"
+                        f"kind={record.get('kind')} path={record.get('stored_path')} "
+                        f"summary={record.get('summary', '')[:1200]}"
                     ),
                     user_id=customer_id,
                     metadata={

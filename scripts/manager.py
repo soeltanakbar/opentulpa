@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import secrets
 import signal
 import subprocess
 import sys
@@ -78,6 +79,14 @@ class TulpaManager:
         # 2. Launch App
         self.log("launching OpenTulpa app...")
         app_env = os.environ.copy()
+        if str(app_env.get("TELEGRAM_BOT_TOKEN", "")).strip() and not str(
+            app_env.get("TELEGRAM_WEBHOOK_SECRET", "")
+        ).strip():
+            app_env["TELEGRAM_WEBHOOK_SECRET"] = secrets.token_urlsafe(24)
+            self.log("generated ephemeral TELEGRAM_WEBHOOK_SECRET for this run.")
+        if not str(app_env.get("HOST", "")).strip():
+            app_env["HOST"] = "127.0.0.1"
+            self.log("defaulted HOST=127.0.0.1 for local-only app binding.")
         src_dir = str((REPO_ROOT / "src").resolve())
         existing_pythonpath = app_env.get("PYTHONPATH", "")
         app_env["PYTHONPATH"] = (
@@ -166,8 +175,8 @@ class TulpaManager:
 
         # 7. Set Webhook
         webhook_url = f"{tunnel_url}/webhook/telegram"
-        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-        secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
+        bot_token = app_env.get("TELEGRAM_BOT_TOKEN")
+        secret = app_env.get("TELEGRAM_WEBHOOK_SECRET")
 
         if bot_token:
             self.log(f"setting telegram webhook to {webhook_url}...")

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from opentulpa.api.routes import (
     register_approval_routes,
@@ -57,6 +59,19 @@ def _require(value: Any, name: str) -> Any:
     if value is None:
         raise RuntimeError(f"{name} not initialized")
     return value
+
+
+def _is_trusted_server_client(host: str) -> bool:
+    value = str(host or "").strip().lower()
+    if not value:
+        return False
+    if value in {"localhost", "testclient"}:
+        return True
+    try:
+        addr = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return bool(addr.is_loopback or addr.is_private or addr.is_link_local)
 
 
 def create_app(
@@ -263,6 +278,21 @@ def create_app(
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    @app.middleware("http")
+    async def enforce_public_route_boundary(
+        request: Request,
+        call_next: Any,
+    ) -> Any:
+        path = request.url.path
+        client_host = str(getattr(getattr(request, "client", None), "host", "") or "")
+        trusted_server_client = _is_trusted_server_client(client_host)
+
+        # Public internet should only reach webhook ingress.
+        if not trusted_server_client and not path.startswith("/webhook/"):
+            return JSONResponse(status_code=403, content={"detail": "forbidden public endpoint"})
+        return await call_next(request)
+
     tulpa_loader = TulpaRouterLoader(project_root=PROJECT_ROOT, mount_router=tulpa_router)
     app.include_router(tulpa_router, prefix="/tulpa")
 

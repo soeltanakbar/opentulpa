@@ -110,6 +110,7 @@ cp .env.example .env
 OPENROUTER_API_KEY=your_key
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 TELEGRAM_BOT_TOKEN=your_botfather_token
+TELEGRAM_WEBHOOK_SECRET=long_random_secret
 ```
 
 Current runtime expects OpenRouter-compatible chat routing for the main agent path.
@@ -124,6 +125,8 @@ Current runtime expects OpenRouter-compatible chat routing for the main agent pa
 - Start FastAPI on `:8000`
 - Launch a `cloudflared` tunnel
 - Auto-register the Telegram webhook at `<public_url>/webhook/telegram`
+- Auto-generate `TELEGRAM_WEBHOOK_SECRET` for that run when missing.
+- Default to `HOST=127.0.0.1` for local-only bind unless you override `HOST`.
 
 If you only need API mode (no Telegram webhook), run:
 
@@ -229,6 +232,10 @@ summary and outputs 3 concise follow-up drafts in my tone."
 ## Safety and Privacy
 
 - External-impact actions (writes, sends, posts) require explicit per-action approval — single-use, expiring, scoped to the requesting user only.
+- Telegram webhook requests can be verified with `TELEGRAM_WEBHOOK_SECRET`.
+- Public internet requests are denied for all routes except `/webhook/*`.
+- `/webhook/telegram` requires Telegram secret auth (`x-telegram-bot-api-secret-token`).
+- `/internal/*` is intended for server-local traffic only (`localhost`/private network).
 - No built-in telemetry or user-tracking pipeline.
 - Fully open source (MIT). Self-hosted by default.
 - All runtime data stays local unless you explicitly configure an external service.

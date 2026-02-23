@@ -147,7 +147,6 @@ class Settings(BaseSettings):
     # OpenRouter: OPENROUTER_API_KEY required. OPENROUTER_MODEL set from llm_model (google/<llm_model>).
     # mem0 is configured via OpenRouter base URL + key (OpenAI-compatible endpoints).
 
-
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
