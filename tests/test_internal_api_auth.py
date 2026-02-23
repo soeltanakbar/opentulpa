@@ -40,7 +40,10 @@ def test_internal_routes_blocked_from_public_clients(
         assert response.status_code == 403
 
         healthz = client.get("/healthz")
-        assert healthz.status_code == 403
+        assert healthz.status_code == 200
+
+        agent_healthz = client.get("/agent/healthz")
+        assert agent_healthz.status_code == 200
     get_settings.cache_clear()
 
 

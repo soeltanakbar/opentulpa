@@ -92,7 +92,8 @@ Compaction is hysteresis-based: compact at high watermark, then reduce toward lo
 ## Internal API boundary
 
 - `/webhook/*` is the public webhook ingress surface (Telegram and future integrations).
-- Public internet clients are denied for all non-webhook routes.
+- Public internet clients are denied for all non-webhook routes except health checks
+  (`/healthz`, `/agent/healthz`) for platform liveness probing.
 - `/webhook/telegram` requires Telegram secret header auth
   (`x-telegram-bot-api-secret-token`).
 - `/internal/*` routes are intended for server-local traffic only

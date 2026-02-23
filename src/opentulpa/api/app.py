@@ -287,9 +287,14 @@ def create_app(
         path = request.url.path
         client_host = str(getattr(getattr(request, "client", None), "host", "") or "")
         trusted_server_client = _is_trusted_server_client(client_host)
+        public_health_paths = {"/healthz", "/agent/healthz"}
 
-        # Public internet should only reach webhook ingress.
-        if not trusted_server_client and not path.startswith("/webhook/"):
+        # Public internet may only reach webhook ingress and read-only health checks.
+        if (
+            not trusted_server_client
+            and not path.startswith("/webhook/")
+            and path not in public_health_paths
+        ):
             return JSONResponse(status_code=403, content={"detail": "forbidden public endpoint"})
         return await call_next(request)
 
