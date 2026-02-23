@@ -99,6 +99,8 @@ Compaction is hysteresis-based: compact at high watermark, then reduce toward lo
   (`localhost`/private network).
 - `scripts/manager.py` auto-generates `TELEGRAM_WEBHOOK_SECRET` for tunnel runs
   when not provided.
+- Cloud deploy bootstrap (`python -m opentulpa`) can auto-register Telegram webhook
+  when `TELEGRAM_BOT_TOKEN` and `PUBLIC_BASE_URL` (or `RAILWAY_PUBLIC_DOMAIN`) are set.
 
 ## Runtime data stores
 

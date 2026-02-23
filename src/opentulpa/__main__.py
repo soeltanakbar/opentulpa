@@ -1,8 +1,10 @@
 """OpenTulpa entry point."""
 
 import os
+import secrets
 import sys
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 
@@ -71,6 +73,68 @@ def _mem0_config_openrouter(
             },
         },
     }
+
+
+def _resolve_public_base_url() -> str:
+    raw = str(os.environ.get("PUBLIC_BASE_URL", "")).strip()
+    if not raw:
+        railway_domain = str(os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")).strip()
+        if railway_domain:
+            raw = f"https://{railway_domain}"
+    if not raw:
+        return ""
+    if not raw.startswith(("http://", "https://")):
+        raw = f"https://{raw}"
+    return raw.rstrip("/")
+
+
+def _ensure_telegram_webhook_secret(settings: Any) -> str:
+    secret = str(settings.telegram_webhook_secret or "").strip()
+    if secret:
+        return secret
+    generated = secrets.token_urlsafe(24)
+    os.environ["TELEGRAM_WEBHOOK_SECRET"] = generated
+    print("TELEGRAM_WEBHOOK_SECRET missing; generated ephemeral secret for this run.")
+    return generated
+
+
+def _auto_configure_telegram_webhook(settings: Any) -> None:
+    bot_token = str(settings.telegram_bot_token or "").strip()
+    if not bot_token:
+        return
+    public_base_url = _resolve_public_base_url()
+    if not public_base_url:
+        print(
+            "PUBLIC_BASE_URL/RAILWAY_PUBLIC_DOMAIN not set; skipping Telegram webhook auto-config."
+        )
+        return
+    webhook_secret = _ensure_telegram_webhook_secret(settings)
+    webhook_url = f"{public_base_url}/webhook/telegram"
+    payload = {"url": webhook_url, "secret_token": webhook_secret}
+    try:
+        import httpx
+
+        with httpx.Client(timeout=15.0) as client:
+            response = client.post(
+                f"https://api.telegram.org/bot{bot_token}/setWebhook",
+                data=payload,
+            )
+        if response.status_code != 200:
+            print(
+                f"Telegram webhook auto-config failed: HTTP {response.status_code} {response.text[:160]}",
+                file=sys.stderr,
+            )
+            return
+        data = response.json() if response.content else {}
+        if bool(data.get("ok")):
+            print(f"Telegram webhook configured: {webhook_url}")
+        else:
+            print(
+                f"Telegram webhook auto-config failed: {data.get('description', 'unknown error')}",
+                file=sys.stderr,
+            )
+    except Exception as exc:
+        print(f"Telegram webhook auto-config failed: {exc}", file=sys.stderr)
 
 
 def main() -> None:
@@ -165,6 +229,7 @@ def main() -> None:
         link_alias_service=link_aliases,
         skill_store_service=skill_store,
     )
+    _auto_configure_telegram_webhook(settings)
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
 
 

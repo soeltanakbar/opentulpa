@@ -41,6 +41,13 @@ STATE_STORE = TelegramStateStore(STATE_PATH)
 logger = logging.getLogger(__name__)
 
 
+def _clean_thread_id(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.lower() in {"none", "null"}:
+        return ""
+    return text
+
+
 def find_session_slots_for_customer_id(customer_id: str) -> list[dict[str, Any]]:
     return STATE_STORE.find_session_slots(customer_id)
 
@@ -273,14 +280,15 @@ async def handle_telegram_text(
         slot = sessions.get(str(ctx.chat_id))
         if not isinstance(slot, dict):
             slot = {}
-        thread_id = str(slot.get("thread_id", "")).strip() or f"chat-{ctx.chat_id}"
+        thread_id = _clean_thread_id(slot.get("thread_id")) or f"chat-{ctx.chat_id}"
+        wake_thread_id = _clean_thread_id(slot.get("wake_thread_id")) or None
         customer_id = str(slot.get("customer_id", "")).strip() or f"telegram_{ctx.user_id}"
         now_utc_iso = datetime.now(timezone.utc).isoformat()
         sessions[str(ctx.chat_id)] = {
             "user_id": ctx.user_id,
             "customer_id": customer_id,
             "thread_id": thread_id,
-            "wake_thread_id": slot.get("wake_thread_id"),
+            "wake_thread_id": wake_thread_id,
             "last_user_message_at": now_utc_iso,
             "last_assistant_message_at": slot.get("last_assistant_message_at"),
         }
