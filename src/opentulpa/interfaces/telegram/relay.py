@@ -20,6 +20,13 @@ logger = logging.getLogger(__name__)
 NO_NOTIFY_TOKEN = "__NO_NOTIFY__"
 
 
+def _clean_thread_id(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.lower() in {"none", "null"}:
+        return ""
+    return text
+
+
 def normalize_reply_text(text: str) -> str:
     import re
 
@@ -429,7 +436,7 @@ async def relay_event_via_main_agent(
             raw_slot = sessions.get(_chat_key)
             if not isinstance(raw_slot, dict):
                 raw_slot = {}
-            wake_thread_id = str(raw_slot.get("wake_thread_id", "")).strip()
+            wake_thread_id = _clean_thread_id(raw_slot.get("wake_thread_id"))
             if not wake_thread_id:
                 wake_thread_id = new_short_id("wake")
                 raw_slot["wake_thread_id"] = wake_thread_id
