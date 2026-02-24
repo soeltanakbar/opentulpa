@@ -18,10 +18,6 @@ class AgentState(TypedDict, total=False):
     active_skill_context: str
     active_skill_names: list[str]
     tool_validation_passed: bool
-    guardrail_has_executable_calls: bool
-    guardrail_allowed_call_ids: list[str]
-    guardrail_feedback_messages: list[AnyMessage]
-    action_notes_by_action: dict[str, str]
     tool_error_count: int
     last_tool_error: str
     claim_check_needs_retry: bool

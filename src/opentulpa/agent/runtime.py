@@ -111,6 +111,7 @@ APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS: set[str] = {
     "routine_delete",
     "automation_delete",
     "browser_use_run",
+    "tulpa_run_terminal",
 }
 
 
@@ -1472,7 +1473,10 @@ class OpenTulpaLangGraphRuntime:
                 safe_args[key_text] = "***"
                 continue
             if isinstance(value, str):
-                safe_args[key_text] = value[:500]
+                if lower_key in {"command", "script", "implementation_command", "code"}:
+                    safe_args[key_text] = value[:12000]
+                else:
+                    safe_args[key_text] = value[:500]
             elif isinstance(value, (int, float, bool)) or value is None:
                 safe_args[key_text] = value
             elif isinstance(value, list):
@@ -1496,25 +1500,22 @@ class OpenTulpaLangGraphRuntime:
                             "recipient_scope (self|external|unknown),\n"
                             "confidence (0..1), reason (string <= 160 chars).\n"
                             "Rules:\n"
-                            "- Primary objective is minimizing false approval prompts while staying safe.\n"
-                            "- Use allow for internal/self/read-only actions without external side effects.\n"
-                            "- Treat uploaded_file_send and web_image_send as self-delivery to the requesting user; "
-                            "default to gate=allow, impact_type=read, recipient_scope=self.\n"
-                            "- Internal system management (routine_delete, automation_delete, routine_list, "
-                            "uploaded_file_search/get/analyze, local context/memory reads) should be allow.\n"
-                            "- skill_upsert/skill_delete are local configuration updates (internal only) and "
-                            "should default to gate=allow unless the action itself directly posts/sends externally.\n"
-                            "- directive_set/directive_clear/time_profile_set are internal profile updates and "
-                            "should default to gate=allow.\n"
-                            "- For routine_create:\n"
-                            "  * If the routine can cause external side effects (posting/sending/mutating external services), "
-                            "set gate=require_approval.\n"
-                            "  * If the routine is internal-only (research, summarization, reminders/check-ins to the same user), "
-                            "set gate=allow.\n"
-                            "- Use require_approval only for actions that can affect external systems/accounts/users "
-                            "(posting, sending, purchasing, mutating external services) or when uncertainty is high.\n"
-                            "- If uncertain between allow vs require_approval, prefer require_approval only when "
-                            "credible external side effects are present.\n"
+                            "- Approval should be required in exactly one case: external write side effects.\n"
+                            "- External write means mutating/posting/sending/purchasing/updating data on services "
+                            "outside this local project/runtime.\n"
+                            "- Internal reads/writes (repo files, local artifacts, local config/state) are allow.\n"
+                            "- Remote reads/fetch/summarization without external mutation are allow.\n"
+                            "- Never set gate=require_approval for read-only actions, including external/API/web "
+                            "reads.\n"
+                            "- For tulpa_run_terminal, classify from full command/script text in action_args.command.\n"
+                            "- For routine_create, evaluate planned downstream behavior from action_args + action_note:\n"
+                            "  * inspect implementation_command/implementation fields as the execution artifact.\n"
+                            "  * if future scheduled behavior includes external writes, set gate=require_approval.\n"
+                            "  * otherwise set gate=allow.\n"
+                            "- For non-routine actions, set gate=require_approval only when this immediate action "
+                            "implies external write side effects.\n"
+                            "- If uncertain, do not escalate by default; set gate=allow with recipient_scope=unknown "
+                            "or self as appropriate.\n"
                             "- Use deny only for actions that should never run as requested.\n"
                             "- Treat action_note as agent reasoning about next planned action and likely tool path.\n"
                             "Do not include any extra keys or markdown."
@@ -1523,7 +1524,7 @@ class OpenTulpaLangGraphRuntime:
                     HumanMessage(
                         content=(
                             f"action_name={safe_name}\n"
-                            f"action_args={json.dumps(safe_args, ensure_ascii=False)[:3000]}\n"
+                            f"action_args={json.dumps(safe_args, ensure_ascii=False)[:20000]}\n"
                             f"action_note={str(action_note or '').strip()[:2000]}"
                         )
                     ),

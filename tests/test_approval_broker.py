@@ -62,7 +62,7 @@ class _ClassifierRuntime:
                     "ok": True,
                     "gate": "require_approval",
                     "impact_type": "write",
-                    "recipient_scope": "unknown",
+                    "recipient_scope": "external",
                     "confidence": 0.9,
                     "reason": "task includes write intent",
                 }
@@ -156,6 +156,27 @@ class _ParanoidClassifierRuntime:
         }
 
 
+class _ReadParanoidClassifierRuntime:
+    async def classify_guardrail_intent(
+        self,
+        *,
+        action_name: str,
+        action_args: dict[str, object],
+        action_note: str | None = None,
+    ) -> dict[str, object]:
+        _ = action_name
+        _ = action_args
+        _ = action_note
+        return {
+            "ok": True,
+            "gate": "require_approval",
+            "impact_type": "read",
+            "recipient_scope": "external",
+            "confidence": 0.95,
+            "reason": "paranoid-read-default",
+        }
+
+
 def _origin_resolver(customer_id: str, thread_id: str) -> dict[str, str]:
     assert customer_id
     assert thread_id
@@ -217,7 +238,7 @@ async def test_routine_delete_is_internal_no_approval(
 
 
 @pytest.mark.asyncio
-async def test_skill_upsert_is_internal_no_approval_even_if_classifier_is_paranoid(
+async def test_skill_upsert_follows_classifier_gate_when_classifier_is_paranoid(
     broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
 ) -> None:
     broker, adapter = broker_factory(runtime=_ParanoidClassifierRuntime())
@@ -232,7 +253,24 @@ async def test_skill_upsert_is_internal_no_approval_even_if_classifier_is_parano
             "instructions": "search and summarize",
         },
     )
+    assert result["gate"] == "require_approval"
+    assert result.get("approval_id")
+    assert len(adapter.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_external_read_never_requires_approval(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, adapter = broker_factory(runtime=_ReadParanoidClassifierRuntime())
+    result = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="chat-42",
+        action_name="browser_use_run",
+        action_args={"task": "Read docs from https://example.com and summarize"},
+    )
     assert result["gate"] == "allow"
+    assert result["reason"] == "read_only_no_approval"
     assert result.get("approval_id") is None
     assert len(adapter.sent) == 0
 
@@ -310,7 +348,7 @@ async def test_browser_read_vs_write_intent(
 
 
 @pytest.mark.asyncio
-async def test_classifier_failure_defaults_to_approval_required(
+async def test_classifier_failure_allows_when_external_write_not_inferred(
     broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
 ) -> None:
     broker, _ = broker_factory()
@@ -320,12 +358,12 @@ async def test_classifier_failure_defaults_to_approval_required(
         action_name="tulpa_run_terminal",
         action_args={"command": "curl -X POST https://example.com -d 'x=1'"},
     )
-    assert result["gate"] == "require_approval"
-    assert result["reason"] == "guardrail_uncertain"
+    assert result["gate"] == "allow"
+    assert result["reason"] == "classifier_uncertain_allow"
 
 
 @pytest.mark.asyncio
-async def test_local_terminal_command_requires_approval_when_classifier_unavailable(
+async def test_local_terminal_command_allows_when_external_write_not_inferred(
     broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
 ) -> None:
     broker, _ = broker_factory()
@@ -335,12 +373,12 @@ async def test_local_terminal_command_requires_approval_when_classifier_unavaila
         action_name="tulpa_run_terminal",
         action_args={"command": "python3 gmail_setup.py"},
     )
-    assert result["gate"] == "require_approval"
-    assert result["reason"] == "guardrail_uncertain"
+    assert result["gate"] == "allow"
+    assert result["reason"] == "classifier_uncertain_allow"
 
 
 @pytest.mark.asyncio
-async def test_exact_duplicate_after_executed_is_denied_without_reprompt(
+async def test_exact_duplicate_after_executed_requests_new_approval(
     broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
 ) -> None:
     broker, adapter = broker_factory()
@@ -385,14 +423,14 @@ async def test_exact_duplicate_after_executed_is_denied_without_reprompt(
     assert executed["ok"] is True
 
     again = await broker.evaluate_action(**request)
-    assert again["gate"] == "deny"
-    assert again["reason"] == "already_executed_recent_duplicate"
-    assert again.get("approval_id") is None
-    assert len(adapter.sent) == 1
+    assert again["gate"] == "require_approval"
+    assert str(again.get("approval_id", "")).strip()
+    assert str(again.get("approval_id", "")).strip() != approval_id
+    assert len(adapter.sent) == 2
 
 
 @pytest.mark.asyncio
-async def test_failed_execution_keeps_approval_reusable_without_reprompt(
+async def test_failed_execution_requests_new_approval_on_retry(
     broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
 ) -> None:
     broker, adapter = broker_factory()
@@ -438,10 +476,10 @@ async def test_failed_execution_keeps_approval_reusable_without_reprompt(
     assert failed["retryable"] is True
 
     again = await broker.evaluate_action(**request)
-    assert again["gate"] == "allow"
-    assert again["reason"] == "reuse_recent_approved"
-    assert again.get("approval_id") is None
-    assert len(adapter.sent) == 1
+    assert again["gate"] == "require_approval"
+    assert str(again.get("approval_id", "")).strip()
+    assert str(again.get("approval_id", "")).strip() != approval_id
+    assert len(adapter.sent) == 2
 
 
 @pytest.mark.asyncio
@@ -468,6 +506,23 @@ async def test_background_thread_external_actions_allow_without_per_run_prompt(
     )
     assert again["gate"] == "allow"
     assert again["reason"] == "background_preauthorized_execution"
+    assert len(adapter.sent) == 0
+
+
+@pytest.mark.asyncio
+async def test_background_thread_legacy_wake_prefix_allows_without_prompt(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, adapter = broker_factory()
+    result = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="wake-legacy01",
+        action_name="email_send",
+        action_args={"to": "a@example.com", "subject": "x", "text": "y"},
+    )
+    assert result["gate"] == "allow"
+    assert result["reason"] == "background_preauthorized_execution"
+    assert result.get("approval_id") is None
     assert len(adapter.sent) == 0
 
 
@@ -534,10 +589,10 @@ async def test_routine_create_external_schedule_requires_approval(
 
 
 @pytest.mark.asyncio
-async def test_browser_task_duplicate_summary_after_executed_is_denied(
+async def test_browser_task_duplicate_after_executed_requests_new_approval(
     broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
 ) -> None:
-    broker, _ = broker_factory()
+    broker, adapter = broker_factory()
     first = await broker.evaluate_action(
         customer_id="telegram_42",
         thread_id="chat-42",
@@ -584,16 +639,17 @@ async def test_browser_task_duplicate_summary_after_executed_is_denied(
             "sessionId": "sess_b",
         },
     )
-    assert again["gate"] == "deny"
-    assert again["reason"] == "already_executed_recent_browser_task"
-    assert again.get("approval_id") is None
+    assert again["gate"] == "require_approval"
+    assert str(again.get("approval_id", "")).strip()
+    assert str(again.get("approval_id", "")).strip() != approval_id
+    assert len(adapter.sent) == 2
 
 
 @pytest.mark.asyncio
-async def test_approval_group_waits_until_all_approved(
+async def test_multiple_approvals_are_independent(
     broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
 ) -> None:
-    broker, _ = broker_factory()
+    broker, adapter = broker_factory()
     first = await broker.evaluate_action(
         customer_id="telegram_42",
         thread_id="chat-42",
@@ -609,26 +665,22 @@ async def test_approval_group_waits_until_all_approved(
     first_id = str(first.get("approval_id", "")).strip()
     second_id = str(second.get("approval_id", "")).strip()
     assert first_id and second_id and first_id != second_id
+    assert len(adapter.sent) == 2
 
-    await broker.decide(
+    first_decision = await broker.decide(
         approval_id=first_id,
         decision="approve",
         actor_interface="telegram",
         actor_id="42",
     )
-    group_mid = broker.get_approval_group_status(approval_id=first_id, window_seconds=60)
-    assert isinstance(group_mid, dict)
-    assert second_id in group_mid["pending_ids"]
-    assert group_mid["executable_ids"] == []
+    assert first_decision["ok"] is True
+    assert first_decision["status"] == "approved"
 
-    await broker.decide(
+    second_decision = await broker.decide(
         approval_id=second_id,
         decision="approve",
         actor_interface="telegram",
         actor_id="42",
     )
-    group_done = broker.get_approval_group_status(approval_id=second_id, window_seconds=60)
-    assert isinstance(group_done, dict)
-    assert group_done["pending_ids"] == []
-    assert first_id in group_done["executable_ids"]
-    assert second_id in group_done["executable_ids"]
+    assert second_decision["ok"] is True
+    assert second_decision["status"] == "approved"

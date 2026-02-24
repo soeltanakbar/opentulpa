@@ -437,7 +437,7 @@ async def relay_event_via_main_agent(
             if not isinstance(raw_slot, dict):
                 raw_slot = {}
             wake_thread_id = _clean_thread_id(raw_slot.get("wake_thread_id"))
-            if not wake_thread_id:
+            if not wake_thread_id or not wake_thread_id.lower().startswith("wake_"):
                 wake_thread_id = new_short_id("wake")
                 raw_slot["wake_thread_id"] = wake_thread_id
                 sessions[_chat_key] = raw_slot

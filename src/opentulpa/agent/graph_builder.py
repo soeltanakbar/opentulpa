@@ -89,9 +89,15 @@ def build_runtime_graph(runtime: Any):
         "browser_use_task_get": ("task_id",),
         "browser_use_task_control": ("task_id",),
         "routine_list": ("customer_id",),
+        "routine_create": (
+            "name",
+            "schedule",
+            "message",
+            "implementation_command",
+            "customer_id",
+        ),
         "routine_delete": ("routine_id", "customer_id"),
         "automation_delete": ("routine_id", "customer_id"),
-        "action_note": ("target_action_name", "note"),
         "guardrail_execute_approved_action": ("approval_id", "customer_id"),
     }
 
@@ -107,7 +113,8 @@ def build_runtime_graph(runtime: Any):
             "If the user asks to forget/reset old preferences, call directive_clear first. "
             "If the user asks what directive is active, call directive_get. "
             "For one-time reminders ('in X minutes/hours' or 'at <time> send me ...'), use "
-            "routine_create with a local ISO timestamp schedule and notify_user=true. "
+            "routine_create with a local ISO timestamp schedule, notify_user=true, and a concrete "
+            "implementation_command that will run at schedule time. "
             "Do not manually convert one-time reminders into UTC cron expressions. "
             "For scheduled routines, default notify_user=true unless the user explicitly asks "
             "for no notifications/alerts. "
@@ -169,13 +176,11 @@ def build_runtime_graph(runtime: Any):
             "guardrail_execute_approved_action with that approval_id. "
             "When a tool returns APPROVAL_PENDING, describe it as pending/requested only. "
             "Never say an action was already created/updated/deleted/executed in that same message. "
-            "Before any potentially side-effecting action (especially external posts/sends, terminal/browser mutations, "
-            "or routine_create for external automations), call action_note first with concise reasoning "
-            "about what you will do next. "
-            "The note should explain your planned action, likely tools, and expected external effects in plain language. "
-            "Approval model: instant external tasks require per-action approval, while scheduled external automations "
-            "must be approved at routine creation time and then run without per-run approval prompts. "
-            "Background scheduled runs are pre-authorized after schedule creation approval. "
+            "Guardrail model: approval checks happen at execution boundary tools (terminal/script execution and "
+            "routine_create planning), not as a separate registration step. "
+            "For routine_create, always provide a concrete implementation_command that describes planned "
+            "scheduled behavior for guard evaluation. "
+            "Scheduled/wake executions are pre-authorized and should run without per-run approval prompts. "
             "Never say an external action was sent/posted/executed until you have a successful tool result. "
             "If approval is still pending or execution was blocked, state clearly that it did not run yet. "
             "For capability requests, avoid generic marketing copy. "
@@ -393,6 +398,19 @@ def build_runtime_graph(runtime: Any):
                 continue
             missing = [arg for arg in required_args.get(call_name, ()) if not args.get(arg)]
             if missing:
+                if call_name == "routine_create" and "implementation_command" in missing:
+                    validation_errors.append(
+                        ToolMessage(
+                            content=(
+                                "ROUTINE_IMPLEMENTATION_COMMAND_REQUIRED: routine_create needs "
+                                "implementation_command (a concrete shell/script command like "
+                                "`python3 tulpa_stuff/scripts/digest.py`) describing what will run "
+                                "on each scheduled execution. Repair the call and retry."
+                            ),
+                            tool_call_id=call_id,
+                        )
+                    )
+                    continue
                 validation_errors.append(
                     ToolMessage(
                         content=(
@@ -418,6 +436,30 @@ def build_runtime_graph(runtime: Any):
             if call_name == "routine_create":
                 latest_user = _latest_user_text(messages)
                 schedule = str(args.get("schedule", "")).strip()
+                implementation_command = str(args.get("implementation_command", "")).strip()
+                if not implementation_command:
+                    validation_errors.append(
+                        ToolMessage(
+                            content=(
+                                "ROUTINE_IMPLEMENTATION_COMMAND_REQUIRED: routine_create must include "
+                                "a non-empty implementation_command (shell/script command) so scheduled "
+                                "runs execute a concrete implementation."
+                            ),
+                            tool_call_id=call_id,
+                        )
+                    )
+                    continue
+                if not _looks_like_shell_command(implementation_command):
+                    validation_errors.append(
+                        ToolMessage(
+                            content=(
+                                "ROUTINE_IMPLEMENTATION_COMMAND_INVALID: implementation_command must "
+                                "be a concrete shell command (executable + args), not natural language."
+                            ),
+                            tool_call_id=call_id,
+                        )
+                    )
+                    continue
                 delay_minutes = _extract_relative_delay_minutes(latest_user)
                 if delay_minutes is not None and _is_cron_like_schedule(schedule):
                     validation_errors.append(
@@ -453,38 +495,19 @@ def build_runtime_graph(runtime: Any):
             return {}
 
         customer_id = state.get("customer_id", "")
-        allowed_ids_raw = state.get("guardrail_allowed_call_ids", [])
-        allowed_ids = (
-            {str(item).strip() for item in allowed_ids_raw if str(item).strip()}
-            if isinstance(allowed_ids_raw, list)
-            else set()
-        )
-        deferred_feedback = state.get("guardrail_feedback_messages", [])
-        deferred_messages: list[ToolMessage] = []
-        if isinstance(deferred_feedback, list):
-            for item in deferred_feedback:
-                if isinstance(item, ToolMessage):
-                    deferred_messages.append(item)
+        thread_id = str(state.get("thread_id", "")).strip()
+        scheduled_origin = thread_id.lower().startswith("wake_") or thread_id.lower().startswith("wake-")
         _log(
             state,
             "graph.tools.start",
             requested_tool_calls=len(last.tool_calls),
-            allowed_call_ids=len(allowed_ids),
-            deferred_feedback_count=len(deferred_messages),
+            execution_origin=("scheduled" if scheduled_origin else "interactive"),
         )
         tool_messages: list[ToolMessage] = []
         had_error = False
         for call in last.tool_calls:
             call_name = str(call.get("name", ""))
             call_id = str(call.get("id", ""))
-            if allowed_ids and call_id not in allowed_ids:
-                _log(
-                    state,
-                    "graph.tools.skipped_unapproved",
-                    tool_name=call_name,
-                    tool_call_id=call_id,
-                )
-                continue
             args = call.get("args", {}) or {}
             try:
                 tool_fn = runtime._tools.get(call_name)
@@ -507,15 +530,21 @@ def build_runtime_graph(runtime: Any):
                     "directive_clear",
                     "time_profile_get",
                     "time_profile_set",
+                    "tulpa_run_terminal",
                     "routine_list",
                     "routine_create",
                     "routine_delete",
                     "automation_delete",
                     "browser_use_run",
-                    "action_note",
                     "guardrail_execute_approved_action",
                 }:
                     args = {**args, "customer_id": customer_id}
+                if call_name in {"tulpa_run_terminal", "routine_create"}:
+                    args = {
+                        **args,
+                        "thread_id": thread_id,
+                        "execution_origin": "scheduled" if scheduled_origin else "interactive",
+                    }
                 if call_name == "routine_create":
                     latest_user = _latest_user_text(messages)
                     corrected_args = dict(args)
@@ -560,11 +589,7 @@ def build_runtime_graph(runtime: Any):
                         tool_call_id=call_id,
                     )
                 )
-        if deferred_messages:
-            tool_messages.extend(deferred_messages)
         update: dict[str, Any] = {"messages": tool_messages}
-        if deferred_messages:
-            update["guardrail_feedback_messages"] = []
         if had_error:
             update["tool_error_count"] = int(state.get("tool_error_count", 0)) + 1
             update["last_tool_error"] = "tool execution failed"
@@ -823,241 +848,8 @@ def build_runtime_graph(runtime: Any):
             return "validate_tools"
         return "claim_check"
 
-    async def guardrail_precheck_node(state: AgentState) -> dict[str, Any]:
-        messages = state.get("messages", [])
-        if not messages:
-            return {"guardrail_has_executable_calls": False, "guardrail_allowed_call_ids": []}
-        last = messages[-1]
-        if not isinstance(last, AIMessage) or not last.tool_calls:
-            return {"guardrail_has_executable_calls": False, "guardrail_allowed_call_ids": []}
-        _log(
-            state,
-            "graph.guardrail.start",
-            tool_call_count=len(last.tool_calls),
-        )
-
-        customer_id = str(state.get("customer_id", "")).strip()
-        thread_id = str(state.get("thread_id", "")).strip()
-        allowed_call_ids: list[str] = []
-        gate_messages: list[ToolMessage] = []
-        no_note_required_actions = {
-            "memory_search",
-            "memory_add",
-            "skill_list",
-            "skill_get",
-            "skill_upsert",
-            "skill_delete",
-            "directive_get",
-            "directive_set",
-            "directive_clear",
-            "time_profile_get",
-            "time_profile_set",
-            "web_search",
-            "fetch_url_content",
-            "fetch_file_content",
-            "uploaded_file_search",
-            "uploaded_file_get",
-            "uploaded_file_analyze",
-            "browser_use_task_get",
-            "routine_list",
-            "routine_delete",
-            "automation_delete",
-            "task_status",
-            "task_events",
-            "task_artifacts",
-            "tulpa_read_file",
-            "tulpa_catalog",
-            "server_time",
-            "guardrail_execute_approved_action",
-        }
-        always_allow_actions = set(no_note_required_actions)
-        retained_notes_raw = state.get("action_notes_by_action", {})
-        retained_notes: dict[str, str] = {}
-        if isinstance(retained_notes_raw, dict):
-            for key, value in retained_notes_raw.items():
-                k = str(key or "").strip()
-                v = str(value or "").strip()[:2000]
-                if k and v:
-                    retained_notes[k] = v
-
-        def _requires_action_note(action_name: str) -> bool:
-            safe = str(action_name or "").strip()
-            if not safe or safe == "action_note":
-                return False
-            return safe not in no_note_required_actions
-
-        note_by_call_id: dict[str, str] = {}
-        notes_by_action: dict[str, list[str]] = {}
-        for call in last.tool_calls:
-            call_name = str(call.get("name", "")).strip()
-            call_id = str(call.get("id", "")).strip()
-            if call_name != "action_note":
-                continue
-            args = call.get("args", {})
-            safe_args = args if isinstance(args, dict) else {}
-            target_action_name = str(safe_args.get("target_action_name", "")).strip()
-            note_text = str(safe_args.get("note", "")).strip()[:2000]
-            target_call_id = str(safe_args.get("target_call_id", "")).strip()
-            if target_action_name and note_text:
-                if target_call_id:
-                    note_by_call_id[target_call_id] = note_text
-                action_notes = notes_by_action.get(target_action_name) or []
-                action_notes.append(note_text)
-                notes_by_action[target_action_name] = action_notes
-                retained_notes[target_action_name] = note_text
-            if call_id:
-                allowed_call_ids.append(call_id)
-                _log(
-                    state,
-                    "graph.guardrail.note_recorded",
-                    tool_call_id=call_id,
-                    target_action_name=target_action_name,
-                    has_target_call_id=bool(target_call_id),
-                )
-
-        for call in last.tool_calls:
-            call_name = str(call.get("name", "")).strip()
-            call_id = str(call.get("id", "")).strip()
-            if call_name == "action_note":
-                continue
-            if call_name in always_allow_actions:
-                allowed_call_ids.append(call_id)
-                _log(
-                    state,
-                    "graph.guardrail.allow_internal",
-                    tool_name=call_name,
-                    tool_call_id=call_id,
-                )
-                continue
-            args = call.get("args", {})
-            safe_args = args if isinstance(args, dict) else {}
-            action_note = note_by_call_id.get(call_id)
-            if not action_note:
-                action_notes = notes_by_action.get(call_name) or []
-                action_note = action_notes[-1] if action_notes else None
-            if not action_note:
-                action_note = retained_notes.get(call_name)
-            if _requires_action_note(call_name) and not action_note:
-                _log(
-                    state,
-                    "graph.guardrail.block_missing_note",
-                    tool_name=call_name,
-                    tool_call_id=call_id,
-                )
-                gate_messages.append(
-                    ToolMessage(
-                        content=(
-                            "ACTION_NOTE_REQUIRED: Before this action, call action_note with "
-                            f"target_action_name={call_name} and a concise reasoning note describing "
-                            "what you are about to do, likely tools, and expected external effects."
-                        ),
-                        tool_call_id=call_id,
-                    )
-                )
-                continue
-            try:
-                result = await runtime.evaluate_tool_guardrail(
-                    customer_id=customer_id,
-                    thread_id=thread_id,
-                    action_name=call_name,
-                    action_args=safe_args,
-                    action_note=action_note,
-                )
-            except Exception as exc:
-                result = {
-                    "gate": "require_approval",
-                    "reason": f"guardrail_error:{exc}",
-                    "summary": f"execute {call_name}",
-                }
-            if not isinstance(result, dict):
-                result = {
-                    "gate": "require_approval",
-                    "reason": "guardrail_invalid_result",
-                    "summary": f"execute {call_name}",
-                }
-            gate = str(result.get("gate", "require_approval")).strip().lower()
-            if gate == "allow":
-                allowed_call_ids.append(call_id)
-                _log(
-                    state,
-                    "graph.guardrail.allow",
-                    tool_name=call_name,
-                    tool_call_id=call_id,
-                )
-                continue
-            approval_id = str(result.get("approval_id", "")).strip()
-            summary = str(result.get("summary", f"execute {call_name}")).strip()
-            reason = str(result.get("reason", "approval_required")).strip()
-            delivery_mode = str(result.get("delivery_mode", "")).strip()
-            _log(
-                state,
-                "graph.guardrail.blocked",
-                tool_name=call_name,
-                tool_call_id=call_id,
-                gate=gate,
-                reason=reason[:240],
-                has_approval_id=bool(approval_id),
-                approval_delivery_mode=delivery_mode,
-            )
-            if approval_id:
-                if delivery_mode:
-                    content = (
-                        "APPROVAL_PENDING: This action is blocked until user approval. "
-                        f"approval_id={approval_id}; summary={summary}; reason={reason}. "
-                        "After approval, call guardrail_execute_approved_action with this approval_id."
-                    )
-                else:
-                    content = (
-                        "APPROVAL_PENDING: This action is blocked until user approval, but no push prompt "
-                        "was delivered automatically. "
-                        f"approval_id={approval_id}; summary={summary}; reason={reason}. "
-                        f"Ask the user to approve manually with /approve {approval_id} (or deny with /deny {approval_id}). "
-                        "After approval, call guardrail_execute_approved_action with this approval_id."
-                    )
-            else:
-                if reason.startswith("already_executed_recent_"):
-                    content = (
-                        "TOOL_ALREADY_EXECUTED: This external-impact action (or an equivalent one) "
-                        "was already executed recently. Do not ask for approval again; instead report "
-                        "the prior execution and suggest checking status/results. "
-                        f"summary={summary}; reason={reason}."
-                    )
-                else:
-                    content = (
-                        "TOOL_DENIED: guardrail denied action and no approval can be requested. "
-                        f"summary={summary}; reason={reason}."
-                    )
-            gate_messages.append(ToolMessage(content=content, tool_call_id=call_id))
-
-        update: dict[str, Any] = {
-            "guardrail_allowed_call_ids": allowed_call_ids,
-            "guardrail_has_executable_calls": bool(allowed_call_ids),
-        }
-        if retained_notes:
-            update["action_notes_by_action"] = retained_notes
-        if gate_messages:
-            if allowed_call_ids:
-                update["guardrail_feedback_messages"] = gate_messages
-            else:
-                update["messages"] = gate_messages
-            update["tool_error_count"] = int(state.get("tool_error_count", 0)) + len(gate_messages)
-            update["last_tool_error"] = "guardrail blocked one or more actions"
-        _log(
-            state,
-            "graph.guardrail.complete",
-            allowed_count=len(allowed_call_ids),
-            blocked_count=len(gate_messages),
-            has_executable_calls=bool(allowed_call_ids),
-        )
-        return update
-
-    def route_after_validate(state: AgentState) -> Literal["guardrail_precheck", "agent"]:
+    def route_after_validate(state: AgentState) -> Literal["tools", "agent"]:
         if state.get("tool_validation_passed", True):
-            return "guardrail_precheck"
-        return "agent"
-
-    def route_after_guardrail(state: AgentState) -> Literal["tools", "agent"]:
-        if bool(state.get("guardrail_has_executable_calls", False)):
             return "tools"
         return "agent"
 
@@ -1073,19 +865,11 @@ def build_runtime_graph(runtime: Any):
         validate_tool_calls_node,
         retry_policy=RetryPolicy(max_attempts=2),
     )
-    builder.add_node(
-        "guardrail_precheck",
-        guardrail_precheck_node,
-        retry_policy=RetryPolicy(max_attempts=2),
-    )
     builder.add_node("tools", tools_node, retry_policy=RetryPolicy(max_attempts=2))
     builder.add_node("claim_check", claim_check_node, retry_policy=RetryPolicy(max_attempts=2))
     builder.add_edge(START, "agent")
     builder.add_conditional_edges("agent", route_after_agent, ["validate_tools", "claim_check"])
-    builder.add_conditional_edges(
-        "validate_tools", route_after_validate, ["guardrail_precheck", "agent"]
-    )
-    builder.add_conditional_edges("guardrail_precheck", route_after_guardrail, ["tools", "agent"])
+    builder.add_conditional_edges("validate_tools", route_after_validate, ["tools", "agent"])
     builder.add_edge("tools", "agent")
     builder.add_conditional_edges("claim_check", route_after_claim_check, ["agent", END])
     return builder.compile(checkpointer=runtime._checkpointer)
