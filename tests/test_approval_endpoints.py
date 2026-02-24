@@ -42,6 +42,15 @@ class _DummyRuntime:
         action_note: str | None = None,
     ) -> dict[str, object]:
         _ = action_note
+        if action_name == "dummy_read_action":
+            return {
+                "ok": True,
+                "gate": "require_approval",
+                "impact_type": "read",
+                "recipient_scope": "external",
+                "confidence": 0.9,
+                "reason": "paranoid read",
+            }
         if action_name == "routine_create":
             combined = (
                 f"{str(action_args.get('name', ''))} "
@@ -68,7 +77,7 @@ class _DummyRuntime:
             "ok": True,
             "gate": "require_approval",
             "impact_type": "write",
-            "recipient_scope": "unknown",
+            "recipient_scope": "external",
             "confidence": 0.8,
             "reason": "default",
         }
@@ -176,6 +185,29 @@ def test_background_actions_are_preauthorized_without_runtime_grant_lookup(
     assert allowed_payload["gate"] == "allow"
     assert allowed_payload["reason"] == "background_preauthorized_execution"
     assert allowed_payload.get("approval_id") is None
+
+
+def test_external_read_is_allow_even_if_classifier_requests_approval(
+    approvals_client: tuple[TestClient, _DummyRuntime],
+) -> None:
+    client, _ = approvals_client
+    evaluate = client.post(
+        "/internal/approvals/evaluate",
+        json={
+            "customer_id": "cust_9",
+            "thread_id": "chat-9",
+            "action_name": "dummy_read_action",
+            "action_args": {"url": "https://example.com"},
+            "origin_interface": "unknown",
+            "origin_user_id": "99",
+            "origin_conversation_id": "",
+        },
+    )
+    assert evaluate.status_code == 200
+    payload = evaluate.json()
+    assert payload["gate"] == "allow"
+    assert payload["reason"] == "read_only_no_approval"
+    assert payload.get("approval_id") is None
 
 
 def test_external_routine_creation_requires_one_time_approval(

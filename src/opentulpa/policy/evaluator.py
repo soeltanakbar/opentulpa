@@ -14,39 +14,9 @@ EXTERNAL_DEFAULT_ACTIONS: set[str] = {
 }
 
 _SENSITIVE_KEY_PARTS = {"key", "token", "secret", "password", "authorization", "api"}
-_INTERNAL_CONTROL_ACTIONS = {"guardrail_execute_approved_action", "action_note"}
-_INTERNAL_SAFE_ACTIONS = {
-    "memory_search",
-    "memory_add",
-    "uploaded_file_search",
-    "uploaded_file_get",
-    "uploaded_file_send",
-    "uploaded_file_analyze",
-    "web_image_send",
-    "skill_list",
-    "skill_get",
-    "skill_upsert",
-    "skill_delete",
-    "directive_get",
-    "directive_set",
-    "directive_clear",
-    "time_profile_get",
-    "time_profile_set",
-    "routine_list",
-    "routine_delete",
-    "automation_delete",
-    "web_search",
-    "fetch_url_content",
-    "fetch_file_content",
-    "tulpa_write_file",
-    "tulpa_validate_file",
-    "tulpa_read_file",
-    "tulpa_catalog",
-    "server_time",
-}
 
 
-def _parse_impact(value: str, default: str = "write") -> str:
+def _parse_impact(value: str, default: str = "read") -> str:
     raw = str(value or "").strip().lower()
     if raw in {"read", "write", "purchase", "costly"}:
         return raw
@@ -60,7 +30,7 @@ def _parse_scope(value: str, default: RecipientScope = "unknown") -> RecipientSc
     return default
 
 
-def _parse_gate(value: str, default: GateAction = "require_approval") -> GateAction:
+def _parse_gate(value: str, default: GateAction = "allow") -> GateAction:
     raw = str(value or "").strip().lower()
     if raw in {"allow", "require_approval", "deny"}:
         return raw  # type: ignore[return-value]
@@ -76,7 +46,10 @@ def _mask_sensitive(action_args: dict[str, Any]) -> dict[str, Any]:
             out[key_text] = "***"
             continue
         if isinstance(value, str):
-            out[key_text] = value[:400]
+            if key_lower in {"command", "script", "implementation_command", "code"}:
+                out[key_text] = value[:12000]
+            else:
+                out[key_text] = value[:400]
         elif isinstance(value, (int, float, bool)) or value is None:
             out[key_text] = value
         elif isinstance(value, list):
@@ -104,7 +77,8 @@ class ApprovalEvaluator:
 
     @staticmethod
     def is_background_thread(thread_id: str) -> bool:
-        return str(thread_id or "").strip().lower().startswith("wake_")
+        raw = str(thread_id or "").strip().lower()
+        return raw.startswith("wake_") or raw.startswith("wake-")
 
     @staticmethod
     def _resolve_recipient_scope(
@@ -182,6 +156,21 @@ class ApprovalEvaluator:
             )
         if action_name == "tulpa_run_terminal":
             return f"run terminal command: {str(action_args.get('command', '')).strip()[:180]}"
+        if action_name == "routine_create":
+            routine_name = str(action_args.get("name", "")).strip()[:80]
+            schedule = str(action_args.get("schedule", "")).strip()[:60]
+            impl_cmd = str(action_args.get("implementation_command", "")).strip()
+            if not impl_cmd and isinstance(action_args.get("execution"), dict):
+                impl_cmd = str((action_args.get("execution") or {}).get("command", "")).strip()
+            if impl_cmd:
+                return (
+                    f"create routine name={routine_name or 'unnamed'} schedule={schedule or 'unspecified'} "
+                    f"run={impl_cmd[:140]}"
+                )
+            return (
+                f"create routine name={routine_name or 'unnamed'} "
+                f"schedule={schedule or 'unspecified'}"
+            )
         return f"execute {action_name}"
 
     async def build_intent(
@@ -198,55 +187,6 @@ class ApprovalEvaluator:
     ) -> ActionIntent:
         safe_action = str(action_name or "").strip()
         safe_note = str(action_note or "").strip()[:2000] or None
-        if safe_action in _INTERNAL_CONTROL_ACTIONS:
-            return ActionIntent(
-                customer_id=str(customer_id or "").strip(),
-                thread_id=str(thread_id or "").strip(),
-                action_name=safe_action,
-                action_args=action_args if isinstance(action_args, dict) else {},
-                origin_interface=origin_interface,
-                origin_user_id=origin_user_id,
-                origin_conversation_id=origin_conversation_id,
-                recipient_scope="self",
-                impact_type="read",
-                summary=self.summarize_action(safe_action, action_args),
-                reason="internal_control_action",
-                confidence=1.0,
-                llm_gate="allow",
-                llm_uncertain=False,
-            )
-        if safe_action in _INTERNAL_SAFE_ACTIONS:
-            default_impact = "read"
-            if safe_action in {
-                "memory_add",
-                "skill_upsert",
-                "skill_delete",
-                "directive_set",
-                "directive_clear",
-                "time_profile_set",
-                "routine_delete",
-                "automation_delete",
-                "uploaded_file_send",
-                "web_image_send",
-                "tulpa_write_file",
-            }:
-                default_impact = "write"
-            return ActionIntent(
-                customer_id=str(customer_id or "").strip(),
-                thread_id=str(thread_id or "").strip(),
-                action_name=safe_action,
-                action_args=action_args if isinstance(action_args, dict) else {},
-                origin_interface=origin_interface,
-                origin_user_id=origin_user_id,
-                origin_conversation_id=origin_conversation_id,
-                recipient_scope="self",
-                impact_type=default_impact,  # type: ignore[arg-type]
-                summary=self.summarize_action(safe_action, action_args),
-                reason="internal_safe_action",
-                confidence=1.0,
-                llm_gate="allow",
-                llm_uncertain=False,
-            )
 
         recipient_scope = self._resolve_recipient_scope(
             action_name=safe_action,
@@ -254,9 +194,9 @@ class ApprovalEvaluator:
             origin_conversation_id=origin_conversation_id,
             origin_user_id=origin_user_id,
         )
-        impact = "write"
-        gate: GateAction = "require_approval"
-        reason = "llm_guardrail_default"
+        impact = "read"
+        gate: GateAction = "allow"
+        reason = "llm_guardrail_default_allow"
         confidence = 0.0
         llm_uncertain = False
 
@@ -271,8 +211,6 @@ class ApprovalEvaluator:
             llm_scope = _parse_scope(hint.get("recipient_scope"), default=recipient_scope)
             if llm_scope != "unknown" or recipient_scope == "unknown":
                 recipient_scope = llm_scope
-            if safe_action in EXTERNAL_DEFAULT_ACTIONS and recipient_scope != "external":
-                recipient_scope = "external"
             reason = _first_non_empty(hint.get("reason"), reason)[:500]
             with_conf = hint.get("confidence", confidence)
             try:
@@ -325,11 +263,20 @@ class ApprovalEvaluator:
             origin_conversation_id=origin_conversation_id,
             action_note=action_note,
         )
-        if intent.llm_uncertain or intent.llm_gate is None:
-            gate: GateAction = "require_approval"
-            reason = "guardrail_uncertain"
+        llm_gate = str(intent.llm_gate or "").strip().lower()
+        if llm_gate in {"allow", "require_approval", "deny"}:
+            gate: GateAction = llm_gate  # type: ignore[assignment]
         else:
-            gate = intent.llm_gate
+            gate = "allow"
+        read_only_override = False
+        if intent.impact_type == "read" and gate == "require_approval":
+            gate = "allow"
+            read_only_override = True
+        if read_only_override:
+            reason = "read_only_no_approval"
+        elif gate == "allow" and intent.llm_uncertain:
+            reason = "classifier_uncertain_allow"
+        else:
             reason = str(intent.reason or "").strip()[:500] or "llm_guardrail_decision"
         decision = GateDecision(
             gate=gate,
@@ -344,4 +291,3 @@ class ApprovalEvaluator:
     @staticmethod
     def as_dict(decision: GateDecision) -> dict[str, Any]:
         return asdict(decision)
-

@@ -49,7 +49,7 @@ def _find_slots(state_store: _FakeStateStore, customer_id: str) -> list[dict[str
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("initial_wake_thread_id", [None, "None"])
+@pytest.mark.parametrize("initial_wake_thread_id", [None, "None", "chat-1", "wake-legacy"])
 async def test_relay_event_regenerates_invalid_wake_thread_id(initial_wake_thread_id: Any) -> None:
     state_store = _FakeStateStore(initial_wake_thread_id=initial_wake_thread_id)
     runtime = _Runtime()
@@ -68,3 +68,24 @@ async def test_relay_event_regenerates_invalid_wake_thread_id(initial_wake_threa
     used_thread_id = str(runtime.calls[0].get("thread_id", ""))
     assert used_thread_id.startswith("wake_")
     assert state_store.state["sessions"]["1"]["wake_thread_id"] == used_thread_id
+
+
+@pytest.mark.asyncio
+async def test_relay_event_keeps_existing_wake_thread_id() -> None:
+    state_store = _FakeStateStore(initial_wake_thread_id="wake_abcd12")
+    runtime = _Runtime()
+
+    replies = await relay_module.relay_event_via_main_agent(
+        customer_id="telegram_1",
+        event_label="routine/scheduled",
+        payload={"routine_name": "autopost", "payload": {"message": "post update"}},
+        state_store=state_store,
+        find_session_slots=lambda cid: _find_slots(state_store, cid),
+        agent_runtime=runtime,
+    )
+
+    assert replies == [{"chat_id": 1, "text": "wake message"}]
+    assert runtime.calls
+    used_thread_id = str(runtime.calls[0].get("thread_id", ""))
+    assert used_thread_id == "wake_abcd12"
+    assert state_store.state["sessions"]["1"]["wake_thread_id"] == "wake_abcd12"

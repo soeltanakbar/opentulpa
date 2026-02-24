@@ -36,21 +36,21 @@ def register_approval_routes(
             actor_interface=actor_interface,
             actor_id=actor_id,
         )
-        if (
-            enqueue_wake
-            and bool(resolved.get("ok"))
-            and str(resolved.get("status", "")).strip() == "approved"
-        ):
+        resolved_status = str(resolved.get("status", "")).strip()
+        if enqueue_wake and bool(resolved.get("ok")) and resolved_status in {"approved", "denied"}:
+            approval_ref = str(resolved.get("id", approval_id)).strip()
             payload = {
                 "type": "approval_event",
-                "event_type": "approved",
+                "event_type": resolved_status,
                 "customer_id": str(resolved.get("customer_id", "")).strip(),
                 "thread_id": str(resolved.get("thread_id", "")).strip(),
-                "approval_id": str(resolved.get("id", approval_id)).strip(),
+                "approval_id": approval_ref,
                 "payload": {
-                    "approval_id": str(resolved.get("id", approval_id)).strip(),
+                    "approval_id": approval_ref,
                     "action_name": str(resolved.get("action_name", "")).strip(),
                     "summary": str(resolved.get("summary", "")).strip(),
+                    "status": resolved_status,
+                    "reason": str(resolved.get("reason", "")).strip(),
                 },
             }
             try:
@@ -59,15 +59,6 @@ def register_approval_routes(
                 resolved["wake_queue_id"] = queue_id
             except Exception:
                 resolved["wake_queued"] = False
-        if bool(resolved.get("ok")):
-            approval_id = str(resolved.get("id", approval_id)).strip()
-            if approval_id:
-                group = broker.get_approval_group_status(
-                    approval_id=approval_id,
-                    window_seconds=60,
-                )
-                if isinstance(group, dict):
-                    resolved["approval_group"] = group
         return resolved
 
     @app.post("/internal/approvals/evaluate")
@@ -145,6 +136,8 @@ def register_approval_routes(
 
         async def _approved_executor(action_name: str, action_args: dict[str, Any], cid: str) -> Any:
             safe_args = action_args if isinstance(action_args, dict) else {}
+            if str(action_name or "").strip() in {"tulpa_run_terminal", "routine_create"}:
+                safe_args = {**safe_args, "preapproved": True}
             if hasattr(agent_runtime, "execute_tool"):
                 return await agent_runtime.execute_tool(
                     action_name=action_name,

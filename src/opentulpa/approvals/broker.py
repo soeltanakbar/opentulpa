@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from opentulpa.approvals.adapters.base import ApprovalAdapter
@@ -49,6 +47,7 @@ class ApprovalBroker:
     - Scheduled external automations evaluate at routine creation time.
     - Background (`wake_*`) runs are treated as pre-authorized scheduled execution.
       No per-run approval prompts/checks.
+    - One approval record represents one executable action intent.
     """
 
     def __init__(
@@ -181,66 +180,8 @@ class ApprovalBroker:
             decision.approval_id = duplicate.id
             decision.status = duplicate.status
             decision.expires_at = duplicate.expires_at
-            # Reuse existing pending approval without sending duplicate prompts.
             decision.delivery_mode = "existing_pending"
             return self._evaluator.as_dict(decision)
-
-        # Reuse recent non-pending decisions for exact same action intent.
-        recent_same_args = self._store.find_recent_matching(
-            customer_id=intent.customer_id,
-            thread_id=intent.thread_id,
-            action_name=intent.action_name,
-            action_args_json=args_json,
-            statuses=("approved", "executed"),
-            lookback_seconds=self._ttl_seconds,
-        )
-        if recent_same_args is not None:
-            if recent_same_args.status == "approved":
-                decision.gate = "allow"
-                decision.reason = "reuse_recent_approved"
-                decision.status = recent_same_args.status
-                decision.expires_at = recent_same_args.expires_at
-                return self._evaluator.as_dict(decision)
-            # Prevent prompt loops requesting approval repeatedly for the same external action.
-            decision.gate = "deny"
-            decision.reason = "already_executed_recent_duplicate"
-            decision.status = recent_same_args.status
-            decision.expires_at = recent_same_args.expires_at
-            decision.approval_id = None
-            decision.delivery_mode = None
-            return self._evaluator.as_dict(decision)
-
-        # Browser tasks often carry transient args (session ids/timeouts). Deduplicate by summary.
-        if intent.action_name == "browser_use_run":
-            recent_browser = self._store.find_recent_matching(
-                customer_id=intent.customer_id,
-                thread_id=intent.thread_id,
-                action_name=intent.action_name,
-                summary=intent.summary,
-                statuses=("pending", "approved", "executed"),
-                lookback_seconds=self._ttl_seconds,
-            )
-            if recent_browser is not None:
-                if recent_browser.status == "pending":
-                    decision.approval_id = recent_browser.id
-                    decision.status = recent_browser.status
-                    decision.expires_at = recent_browser.expires_at
-                    # Reuse existing pending approval without sending duplicate prompts.
-                    decision.delivery_mode = "existing_pending"
-                    return self._evaluator.as_dict(decision)
-                if recent_browser.status == "approved":
-                    decision.gate = "allow"
-                    decision.reason = "reuse_recent_approved_browser_task"
-                    decision.status = recent_browser.status
-                    decision.expires_at = recent_browser.expires_at
-                    return self._evaluator.as_dict(decision)
-                decision.gate = "deny"
-                decision.reason = "already_executed_recent_browser_task"
-                decision.status = recent_browser.status
-                decision.expires_at = recent_browser.expires_at
-                decision.approval_id = None
-                decision.delivery_mode = None
-                return self._evaluator.as_dict(decision)
 
         approval_id = new_short_id("apr")
         record = self._store.create_pending(
@@ -296,64 +237,6 @@ class ApprovalBroker:
 
     def get(self, approval_id: str) -> dict[str, Any] | None:
         return self._store.as_dict(self._store.get(approval_id))
-
-    def get_approval_group_status(
-        self,
-        *,
-        approval_id: str,
-        window_seconds: int = 60,
-    ) -> dict[str, Any] | None:
-        record = self._store.get(approval_id)
-        if record is None:
-            return None
-        related = self._store.list_thread_window(
-            customer_id=record.customer_id,
-            thread_id=record.thread_id,
-            anchor_created_at=record.created_at,
-            window_seconds=window_seconds,
-        )
-        if not related:
-            related = [record]
-
-        def _parse_dt(value: str) -> datetime:
-            dt = datetime.fromisoformat(str(value or "").strip())
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
-
-        created_points: list[datetime] = []
-        for item in related:
-            with suppress(Exception):
-                created_points.append(_parse_dt(item.created_at))
-        group_start = min(created_points) if created_points else _parse_dt(record.created_at)
-        deadline = group_start + timedelta(seconds=max(1, int(window_seconds)))
-        now = self._store.utc_now()
-        window_open = now <= deadline
-
-        ids = [item.id for item in related]
-        pending_ids = [item.id for item in related if item.status == "pending"]
-        approved_ids = [item.id for item in related if item.status == "approved"]
-        executed_ids = [item.id for item in related if item.status == "executed"]
-        denied_ids = [item.id for item in related if item.status == "denied"]
-        expired_ids = [item.id for item in related if item.status == "expired"]
-
-        executable_ids: list[str] = []
-        if window_open and not pending_ids and not denied_ids and not expired_ids:
-            executable_ids = approved_ids
-
-        return {
-            "window_seconds": int(window_seconds),
-            "window_open": bool(window_open),
-            "group_start_at": group_start.isoformat(),
-            "deadline_at": deadline.isoformat(),
-            "all_ids": ids,
-            "pending_ids": pending_ids,
-            "approved_ids": approved_ids,
-            "executed_ids": executed_ids,
-            "denied_ids": denied_ids,
-            "expired_ids": expired_ids,
-            "executable_ids": executable_ids,
-        }
 
     async def decide(
         self,

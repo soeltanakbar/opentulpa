@@ -28,6 +28,10 @@ from opentulpa.agent.utils import (
 from opentulpa.agent.utils import (
     looks_like_shell_command as _looks_like_shell_command,
 )
+from opentulpa.policy.execution_boundary import (
+    ExecutionBoundaryContext,
+    ExecutionBoundaryGuard,
+)
 
 
 def _browser_use_api_key() -> str:
@@ -90,6 +94,44 @@ def _normalize_cleanup_paths(paths: list[str] | None) -> list[str]:
         seen.add(path)
         out.append(path)
     return out
+
+
+def _normalize_execution_origin(
+    *,
+    thread_id: str | None,
+    execution_origin: str | None,
+) -> str:
+    return ExecutionBoundaryGuard.normalize_execution_origin(
+        thread_id=str(thread_id or "").strip(),
+        execution_origin=str(execution_origin or "").strip(),
+    )
+
+
+def _approval_pending_payload(
+    *,
+    action_name: str,
+    command_preview: str,
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    approval_id = str(decision.get("approval_id", "")).strip()
+    summary = str(decision.get("summary", f"execute {action_name}")).strip()
+    reason = str(decision.get("reason", "approval_required")).strip()
+    message = (
+        "APPROVAL_PENDING: This executable action is waiting for user approval "
+        f"(approval_id={approval_id}; summary={summary}; reason={reason})."
+    )
+    return {
+        "ok": False,
+        "status": "approval_pending",
+        "action_name": action_name,
+        "command_preview": command_preview[:300],
+        "approval_id": approval_id or None,
+        "delivery_mode": str(decision.get("delivery_mode", "")).strip() or None,
+        "summary": summary,
+        "reason": reason,
+        "message": message,
+        "gate": "require_approval",
+    }
 
 
 def _compact_browser_use_task_view(
@@ -369,6 +411,8 @@ async def _sync_proactive_heartbeat(
 
 
 def register_runtime_tools(runtime: Any) -> dict[str, Any]:
+    boundary_guard = ExecutionBoundaryGuard(runtime=runtime)
+
     @tool
     async def memory_search(query: str, customer_id: str) -> Any:
         """Search user memory."""
@@ -1116,9 +1160,14 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         command: str,
         working_dir: str = "tulpa_stuff",
         timeout_seconds: int = 90,
+        customer_id: str = "",
+        thread_id: str = "",
+        execution_origin: str | None = None,
+        preapproved: bool = False,
     ) -> Any:
-        """Run approved terminal command."""
-        if not _looks_like_shell_command(command):
+        """Run executable shell/script command through execution-boundary guard."""
+        safe_command = str(command or "").strip()
+        if not _looks_like_shell_command(safe_command):
             return {
                 "error": (
                     "Command rejected: provide a concrete shell command (executable + args), "
@@ -1126,11 +1175,52 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
                 )
             }
         safe_timeout = max(5, min(int(timeout_seconds), 600))
+        safe_customer = str(customer_id or "").strip()
+        safe_thread = str(thread_id or "").strip()
+        normalized_origin = _normalize_execution_origin(
+            thread_id=safe_thread,
+            execution_origin=execution_origin,
+        )
+
+        decision = await boundary_guard.evaluate(
+            ExecutionBoundaryContext(
+                customer_id=safe_customer,
+                thread_id=safe_thread or (f"chat-{safe_customer}" if safe_customer else "interactive"),
+                action_name="tulpa_run_terminal",
+                action_args={
+                    "command": safe_command,
+                    "working_dir": str(working_dir or "").strip() or "tulpa_stuff",
+                    "timeout_seconds": safe_timeout,
+                    "execution_origin": normalized_origin,
+                },
+                execution_origin=normalized_origin,
+                preapproved=bool(preapproved),
+                action_note=(
+                    "Execution-boundary guard check for terminal/script action. "
+                    "Decide based on full command external write side effects."
+                ),
+            )
+        )
+        gate = str((decision or {}).get("gate", "allow")).strip().lower()
+        if gate == "require_approval":
+            return _approval_pending_payload(
+                action_name="tulpa_run_terminal",
+                command_preview=safe_command,
+                decision=decision if isinstance(decision, dict) else {},
+            )
+        if gate == "deny":
+            return {
+                "ok": False,
+                "status": "denied",
+                "gate": "deny",
+                "reason": str((decision or {}).get("reason", "guardrail_denied")).strip(),
+            }
+
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/tulpa/run_terminal",
             json_body={
-                "command": command,
+                "command": safe_command,
                 "working_dir": working_dir,
                 "timeout_seconds": safe_timeout,
             },
@@ -1139,7 +1229,10 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         )
         if r.status_code != 200:
             return {"error": f"terminal failed: {r.text}"}
-        return r.json()
+        payload = r.json()
+        if isinstance(payload, dict):
+            payload["execution_origin"] = normalized_origin
+        return payload
 
     @tool
     async def tulpa_read_file(path: str, max_chars: int = 12000) -> Any:
@@ -1224,16 +1317,88 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         name: str,
         schedule: str,
         message: str,
+        implementation_command: str,
         customer_id: str,
         notify_user: bool = True,
         cleanup_paths: list[str] | None = None,
+        thread_id: str = "",
+        execution_origin: str | None = None,
+        preapproved: bool = False,
     ) -> Any:
         """
         Create a scheduled routine.
         - Recurring: cron (e.g. "0 9 * * *")
         - One-time: local ISO datetime (e.g. "2026-02-18T23:45:00+08:00")
+        - implementation_command: planned shell/script command used for guardrail evaluation.
         - cleanup_paths: optional repo-relative file paths to remove when deleting this automation.
         """
+        safe_name = str(name or "").strip()
+        safe_schedule = str(schedule or "").strip()
+        safe_message = str(message or "").strip()
+        safe_command = str(implementation_command or "").strip()
+        safe_customer = str(customer_id or "").strip()
+        if not safe_name:
+            return {"error": "routine_create failed: name is required"}
+        if not safe_schedule:
+            return {"error": "routine_create failed: schedule is required"}
+        if not safe_customer:
+            return {"error": "routine_create failed: customer_id is required"}
+        if not safe_command:
+            return {
+                "error": (
+                    "ROUTINE_IMPLEMENTATION_COMMAND_REQUIRED: routine_create requires "
+                    "implementation_command (concrete shell/script command)."
+                )
+            }
+        if not _looks_like_shell_command(safe_command):
+            return {
+                "error": (
+                    "ROUTINE_IMPLEMENTATION_COMMAND_INVALID: implementation_command must be a "
+                    "concrete shell command (executable + args)."
+                )
+            }
+
+        normalized_origin = _normalize_execution_origin(
+            thread_id=thread_id,
+            execution_origin=execution_origin,
+        )
+
+        decision = await boundary_guard.evaluate(
+            ExecutionBoundaryContext(
+                customer_id=safe_customer,
+                thread_id=str(thread_id or "").strip() or f"chat-{safe_customer}",
+                action_name="routine_create",
+                action_args={
+                    "name": safe_name,
+                    "schedule": safe_schedule,
+                    "message": safe_message[:1200],
+                    "customer_id": safe_customer,
+                    "notify_user": bool(notify_user),
+                    "implementation_command": safe_command,
+                },
+                execution_origin=normalized_origin,
+                preapproved=bool(preapproved),
+                action_note=(
+                    "Routine creation with planned implementation command. "
+                    "Classify external write side effects for future scheduled behavior."
+                ),
+            )
+        )
+        gate = str((decision or {}).get("gate", "allow")).strip().lower()
+        if gate == "require_approval":
+            return _approval_pending_payload(
+                action_name="routine_create",
+                command_preview=safe_command,
+                decision=decision if isinstance(decision, dict) else {},
+            )
+        if gate == "deny":
+            return {
+                "ok": False,
+                "status": "denied",
+                "gate": "deny",
+                "reason": str((decision or {}).get("reason", "guardrail_denied")).strip(),
+            }
+
         auto_notify = bool(notify_user)
         safe_cleanup_paths = _normalize_cleanup_paths(cleanup_paths)
 
@@ -1241,16 +1406,16 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
             "POST",
             "/internal/scheduler/routine",
             json_body={
-                "name": name,
-                "schedule": schedule,
+                "name": safe_name,
+                "schedule": safe_schedule,
                 "payload": {
-                    "message": message,
-                    "customer_id": customer_id,
+                    "message": safe_message,
+                    "customer_id": safe_customer,
                     "notify_user": auto_notify,
                     "notification_opt_out": not auto_notify,
                     "cleanup_paths": safe_cleanup_paths,
                 },
-                "is_cron": " " in schedule and len(schedule.split()) >= 5,
+                "is_cron": " " in safe_schedule and len(safe_schedule.split()) >= 5,
             },
             timeout=10.0,
         )
@@ -1342,34 +1507,6 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return r.json()
 
     @tool
-    async def action_note(
-        target_action_name: str,
-        note: str,
-        customer_id: str,
-        target_call_id: str | None = None,
-    ) -> Any:
-        """
-        Record pre-action reasoning for a potentially side-effecting action.
-
-        Use this right before external actions or external schedule creation.
-        Keep it as plain-language reasoning about what will happen next.
-        """
-        action = str(target_action_name or "").strip()
-        note_text = str(note or "").strip()
-        if not action:
-            return {"error": "action_note failed: target_action_name is required"}
-        if not note_text:
-            return {"error": "action_note failed: note is required"}
-        return {
-            "ok": True,
-            "target_action_name": action,
-            "target_call_id": str(target_call_id or "").strip() or None,
-            "note": note_text[:2000],
-            "customer_id": str(customer_id or "").strip(),
-            "recorded": True,
-        }
-
-    @tool
     async def guardrail_execute_approved_action(approval_id: str, customer_id: str) -> Any:
         """Execute a previously approved external-impact action exactly once."""
         aid = str(approval_id or "").strip()
@@ -1435,7 +1572,6 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         "routine_list": routine_list,
         "routine_delete": routine_delete,
         "automation_delete": automation_delete,
-        "action_note": action_note,
         "guardrail_execute_approved_action": guardrail_execute_approved_action,
         "server_time": server_time,
     }

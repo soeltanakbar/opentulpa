@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -127,6 +128,69 @@ async def _run_post_approval_execution_flow(
         await client.send_message(chat_id=chat_id, text=final_outcome, parse_mode="HTML")
 
 
+async def _run_post_denial_iteration_flow(
+    *,
+    get_telegram_client: Callable[[], Any],
+    get_agent_runtime: Callable[[], Any],
+    decision_payload: dict[str, Any],
+    chat_id: int,
+) -> None:
+    runtime = get_agent_runtime()
+    customer_id = str(decision_payload.get("customer_id", "")).strip()
+    thread_id = str(decision_payload.get("thread_id", "")).strip() or f"chat-{chat_id}"
+    approval_id = str(
+        decision_payload.get("id", decision_payload.get("approval_id", ""))
+    ).strip()
+    action_name = str(decision_payload.get("action_name", "")).strip()
+    summary = str(decision_payload.get("summary", "")).strip()
+    action_args = (
+        decision_payload.get("action_args")
+        if isinstance(decision_payload.get("action_args"), dict)
+        else {}
+    )
+    fallback_text = (
+        "Understood. You denied this action. Tell me what to change and I will revise "
+        "the plan and resubmit for approval."
+    )
+    if runtime is None or not hasattr(runtime, "ainvoke_text") or not customer_id:
+        with suppress(Exception):
+            await get_telegram_client().send_message(
+                chat_id=chat_id,
+                text=fallback_text,
+                parse_mode="HTML",
+            )
+        return
+    prompt = (
+        "System update: The user denied your planned action.\n"
+        "Do not execute external actions now.\n"
+        f"- approval_id: {approval_id or 'unknown'}\n"
+        f"- action_name: {action_name or 'unknown'}\n"
+        f"- summary: {summary or 'none'}\n"
+        f"- action_args: {json.dumps(action_args, ensure_ascii=False)[:3000]}\n\n"
+        "Respond to the user now in plain language.\n"
+        "1) Acknowledge denial.\n"
+        "2) Ask what should change.\n"
+        "3) Offer to resubmit a revised action for approval."
+    )
+    try:
+        reply = await runtime.ainvoke_text(
+            thread_id=thread_id,
+            customer_id=customer_id,
+            text=prompt,
+            include_pending_context=False,
+            recursion_limit_override=36,
+        )
+    except Exception:
+        reply = ""
+    safe_reply = str(reply or "").strip() or fallback_text
+    with suppress(Exception):
+        await get_telegram_client().send_message(
+            chat_id=chat_id,
+            text=safe_reply,
+            parse_mode="HTML",
+        )
+
+
 def register_telegram_webhook_routes(
     app: FastAPI,
     *,
@@ -173,35 +237,10 @@ def register_telegram_webhook_routes(
                 actor_id=str(callback_user_id),
                 enqueue_wake=False,
             )
-            group = result.get("approval_group") if isinstance(result, dict) else {}
-            if not isinstance(group, dict):
-                group = {}
-            pending_ids = [
-                str(item).strip()
-                for item in (group.get("pending_ids") or [])
-                if str(item).strip()
-            ]
-            window_open = bool(group.get("window_open", True))
-            executable_ids = [
-                str(item).strip()
-                for item in (group.get("executable_ids") or [])
-                if str(item).strip()
-            ]
             approved = bool(result.get("ok")) and str(result.get("status", "")).strip() == "approved"
             denied = bool(result.get("ok")) and str(result.get("status", "")).strip() == "denied"
             if approved:
-                if pending_ids and window_open:
-                    ack_text = (
-                        "Approval recorded. "
-                        f"Waiting for {len(pending_ids)} more approval(s) within 60s before continuing."
-                    )
-                elif pending_ids and not window_open:
-                    ack_text = (
-                        "Approval window expired before all required approvals were received. "
-                        "Please run the action again."
-                    )
-                else:
-                    ack_text = "Working on the task."
+                ack_text = "Working on the task."
             elif denied:
                 ack_text = "Action denied."
             else:
@@ -215,33 +254,29 @@ def register_telegram_webhook_routes(
                     show_alert=False,
                 )
             if approved:
-                if pending_ids and window_open:
-                    if isinstance(callback_message_id, int):
-                        with suppress(Exception):
-                            await get_telegram_client().edit_message_text(
-                                chat_id=callback_chat_id,
-                                message_id=callback_message_id,
-                                text=ack_text,
-                                parse_mode="HTML",
-                                reply_markup={"inline_keyboard": []},
-                            )
-                    return
-                if pending_ids and not window_open:
-                    with suppress(Exception):
-                        await get_telegram_client().send_message(
-                            chat_id=callback_chat_id,
-                            text=ack_text,
-                            parse_mode="HTML",
-                        )
-                    return
-                exec_ids = executable_ids or [approval_id]
                 await _run_post_approval_execution_flow(
                     get_telegram_client=get_telegram_client,
                     get_approval_execution_orchestrator=get_approval_execution_orchestrator,
-                    approval_ids=exec_ids,
+                    approval_ids=[approval_id],
                     decision_payload=result if isinstance(result, dict) else {},
                     chat_id=callback_chat_id,
                     approval_message_id=callback_message_id if isinstance(callback_message_id, int) else None,
+                )
+            elif denied:
+                if isinstance(callback_message_id, int):
+                    with suppress(Exception):
+                        await get_telegram_client().edit_message_text(
+                            chat_id=callback_chat_id,
+                            message_id=callback_message_id,
+                            text=ack_text,
+                            parse_mode="HTML",
+                            reply_markup={"inline_keyboard": []},
+                        )
+                await _run_post_denial_iteration_flow(
+                    get_telegram_client=get_telegram_client,
+                    get_agent_runtime=get_agent_runtime,
+                    decision_payload=result if isinstance(result, dict) else {},
+                    chat_id=callback_chat_id,
                 )
             elif isinstance(callback_message_id, int):
                 with suppress(Exception):
@@ -267,56 +302,20 @@ def register_telegram_webhook_routes(
                 actor_id=str(user_id),
                 enqueue_wake=False,
             )
-            group = result.get("approval_group") if isinstance(result, dict) else {}
-            if not isinstance(group, dict):
-                group = {}
-            pending_ids = [
-                str(item).strip()
-                for item in (group.get("pending_ids") or [])
-                if str(item).strip()
-            ]
-            window_open = bool(group.get("window_open", True))
-            executable_ids = [
-                str(item).strip()
-                for item in (group.get("executable_ids") or [])
-                if str(item).strip()
-            ]
             approved = bool(result.get("ok")) and str(result.get("status", "")).strip() == "approved"
+            denied = bool(result.get("ok")) and str(result.get("status", "")).strip() == "denied"
             if approved:
-                if pending_ids and window_open:
-                    with suppress(Exception):
-                        await get_telegram_client().send_message(
-                            chat_id=chat_id,
-                            text=(
-                                "Approval recorded. "
-                                f"Waiting for {len(pending_ids)} more approval(s) within 60s before continuing."
-                            ),
-                            parse_mode="HTML",
-                        )
-                    return
-                if pending_ids and not window_open:
-                    with suppress(Exception):
-                        await get_telegram_client().send_message(
-                            chat_id=chat_id,
-                            text=(
-                                "Approval window expired before all required approvals were received. "
-                                "Please run the action again."
-                            ),
-                            parse_mode="HTML",
-                        )
-                    return
-                exec_ids = executable_ids or [approval_id]
                 await _run_post_approval_execution_flow(
                     get_telegram_client=get_telegram_client,
                     get_approval_execution_orchestrator=get_approval_execution_orchestrator,
-                    approval_ids=exec_ids,
+                    approval_ids=[approval_id],
                     decision_payload=result if isinstance(result, dict) else {},
                     chat_id=int(chat_id),
                 )
             else:
                 reply_text = (
                     "Action denied."
-                    if bool(result.get("ok")) and str(result.get("status", "")).strip() == "denied"
+                    if denied
                     else (
                         f"Approval {requested_decision} failed: "
                         f"{result.get('reason', 'not_allowed')}"
@@ -327,6 +326,13 @@ def register_telegram_webhook_routes(
                         chat_id=chat_id,
                         text=reply_text,
                         parse_mode="HTML",
+                    )
+                if denied:
+                    await _run_post_denial_iteration_flow(
+                        get_telegram_client=get_telegram_client,
+                        get_agent_runtime=get_agent_runtime,
+                        decision_payload=result if isinstance(result, dict) else {},
+                        chat_id=int(chat_id),
                     )
             return
 

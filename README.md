@@ -17,7 +17,15 @@ It does two things most assistants don't:
 
 The longer you run it, the more personal and capable it gets.
 
-> Two env vars. One command. A self-hosted agent that compounds over time.
+> One key. One command. Add interfaces and browsing only when you need them.
+
+## Start in 5 Minutes
+
+1. Set `OPENROUTER_API_KEY` in `.env`.
+2. Run `uv run python -m opentulpa`.
+3. Start chatting via the internal chat API.
+
+Full steps are in [Quick Start](#quick-start).
 
 ---
 
@@ -88,18 +96,14 @@ This makes the agent runtime inexpensive for day-to-day use, even with tool-driv
 
 - Python `3.10+`
 - [`uv`](https://docs.astral.sh/uv/) installed
-- Telegram bot token from `@BotFather`
-- `cloudflared` installed (recommended for local webhook tunneling)
+- Telegram bot token from `@BotFather` *(optional, Telegram interface only)*
+- `cloudflared` installed *(optional, local Telegram webhook tunneling only)*
 
 ---
 
 ## Quick Start
 
-**1. Create your Telegram bot:**
-- Chat with `@BotFather` → run `/newbot` → copy the token.
-- Open your new bot and press `Start`.
-
-**2. Configure:**
+**1. Configure:**
 
 ```bash
 cp .env.example .env
@@ -108,14 +112,29 @@ cp .env.example .env
 ```bash
 # .env
 OPENROUTER_API_KEY=your_key
-OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-TELEGRAM_BOT_TOKEN=your_botfather_token
-TELEGRAM_WEBHOOK_SECRET=long_random_secret
 ```
 
 Current runtime expects OpenRouter-compatible chat routing for the main agent path.
 
-**3. Start (Telegram + webhook manager):**
+**2. Start (API mode):**
+
+```bash
+uv run python -m opentulpa
+```
+
+**3. Optional: Telegram interface**
+
+Create your Telegram bot first:
+- Chat with `@BotFather` → run `/newbot` → copy the token.
+- Open your new bot and press `Start`.
+
+Add this env var:
+
+```bash
+TELEGRAM_BOT_TOKEN=your_botfather_token
+```
+
+Then start Telegram + webhook manager:
 
 ```bash
 ./start.sh
@@ -125,22 +144,22 @@ Current runtime expects OpenRouter-compatible chat routing for the main agent pa
 - Start FastAPI on `:8000`
 - Launch a `cloudflared` tunnel
 - Auto-register the Telegram webhook at `<public_url>/webhook/telegram`
-- Auto-generate `TELEGRAM_WEBHOOK_SECRET` for that run when missing.
+- Auto-generate a Telegram webhook secret for that run when missing.
 - Default to `HOST=127.0.0.1` for local-only bind unless you override `HOST`.
-
-If you only need API mode (no Telegram webhook), run:
-
-```bash
-uv run python -m opentulpa
-```
-
-**4. Webhook (if not using cloudflared):**
 
 ```bash
 curl "https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook?url=https://yourdomain.com/webhook/telegram"
 ```
 
 > Telegram requires a public URL. For local dev, `cloudflared` or `ngrok` both work.
+
+**4. Optional: Browser Use capability**
+
+Add this env var only if you want Browser Use browsing tools:
+
+```bash
+BROWSER_USE_API_KEY=your_key
+```
 
 **5. Start chatting.** Try:
 
@@ -154,54 +173,12 @@ Create a daily 8:30am Gmail summary and post the top 5 action items here.
 - `http://localhost:8000/healthz`
 - `http://localhost:8000/agent/healthz`
 
-## Docker / Railway Deployment (Env-Only)
+## Deployment
 
-This repo now includes a production `Dockerfile` so Railway can deploy it directly.
+Deployment is documented in:
+- [Deployment Guide](docs/DEPLOYMENT.md)
 
-### Required env vars
-
-- `OPENROUTER_API_KEY`
-- `TELEGRAM_BOT_TOKEN`
-
-### Required for interactive browsing (Browser Use tools)
-
-- `BROWSER_USE_API_KEY`
-
-### Recommended env vars
-
-- `TELEGRAM_WEBHOOK_SECRET` (if omitted, an ephemeral secret is generated at startup)
-- `PUBLIC_BASE_URL` (for example `https://your-app.up.railway.app`)
-- `BROWSER_USE_BASE_URL` (defaults to `https://api.browser-use.com/api/v2`)
-
-Railway note:
-- If `PUBLIC_BASE_URL` is empty but Railway provides `RAILWAY_PUBLIC_DOMAIN`,
-  startup auto-registers Telegram webhook to
-  `https://$RAILWAY_PUBLIC_DOMAIN/webhook/telegram`.
-
-### What is automatic on startup
-
-- App starts on `HOST=0.0.0.0`, `PORT` from env (default `8000`)
-- Telegram webhook is auto-configured when:
-  - `TELEGRAM_BOT_TOKEN` exists, and
-  - `PUBLIC_BASE_URL` or `RAILWAY_PUBLIC_DOMAIN` exists
-- Webhook URL set to `<public_base_url>/webhook/telegram`
-- `secret_token` is sent in `setWebhook` using `TELEGRAM_WEBHOOK_SECRET`
-
-### Railway quick setup
-
-1. Create a new Railway project from this repo.
-2. Railway detects `Dockerfile` and builds automatically.
-3. Set env vars in Railway:
-   - `OPENROUTER_API_KEY`
-   - `TELEGRAM_BOT_TOKEN`
-   - `TELEGRAM_WEBHOOK_SECRET` (recommended)
-   - `PUBLIC_BASE_URL` (optional if `RAILWAY_PUBLIC_DOMAIN` is available)
-4. Deploy.
-
-Optional persistence:
-- Mount a volume for `/app/.opentulpa` so memory, skills, approvals, and checkpoints survive redeploys.
-
-### Direct API turn (non-Telegram)
+## Direct API turn (non-Telegram)
 
 You can run conversation turns directly through the internal chat route:
 
@@ -240,20 +217,17 @@ summary and outputs 3 concise follow-up drafts in my tone."
 |---|---|
 | `OPENROUTER_API_KEY` | LLM routing and embeddings |
 
-**Required for Telegram mode:**
+**Optional (Telegram interface):**
 
 | Variable | Purpose |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | Telegram interface |
 
-**Optional:**
+**Optional (Browser Use capability):**
 
 | Variable | Purpose |
 |---|---|
 | `BROWSER_USE_API_KEY` | Browser automation (form filling, web flows) |
-| `SLACK_BOT_TOKEN` | Slack read/post integration tools |
-| `AGENT_BEHAVIOR_LOG_ENABLED` | Enable structured runtime behavior logging |
-| `AGENT_BEHAVIOR_LOG_PATH` | JSONL file path for behavior logs |
 
 **Core stack:** FastAPI · LangGraph · LangChain · mem0 · SQLite · APScheduler
 
@@ -279,7 +253,7 @@ summary and outputs 3 concise follow-up drafts in my tone."
 ## Safety and Privacy
 
 - External-impact actions (writes, sends, posts) require explicit per-action approval — single-use, expiring, scoped to the requesting user only.
-- Telegram webhook requests can be verified with `TELEGRAM_WEBHOOK_SECRET`.
+- Telegram webhook requests support secret verification.
 - Public internet requests are denied for all routes except `/webhook/*` and health checks (`/healthz`, `/agent/healthz`).
 - `/webhook/telegram` requires Telegram secret auth (`x-telegram-bot-api-secret-token`).
 - `/internal/*` is intended for server-local traffic only (`localhost`/private network).
