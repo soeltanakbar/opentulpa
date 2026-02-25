@@ -138,7 +138,7 @@ class _ScriptedAgentModel:
         self._recorder = recorder
         self._bound_tools: list[str] = []
 
-    def bind_tools(self, tools: list[Any]) -> "_ScriptedAgentModel":
+    def bind_tools(self, tools: list[Any]) -> _ScriptedAgentModel:
         names: list[str] = []
         for tool in tools:
             name = str(getattr(tool, "name", "") or "").strip()
@@ -659,6 +659,29 @@ def _post_telegram_approval_callback(
     assert response.status_code == 200
 
 
+def _post_telegram_text(
+    *,
+    harness: _Harness,
+    text: str,
+    chat_id: int = 777,
+    user_id: int = 999,
+    message_id: int = 77,
+) -> None:
+    response = harness.client.post(
+        "/webhook/telegram",
+        headers={"x-telegram-bot-api-secret-token": "test-secret"},
+        json={
+            "message": {
+                "message_id": int(message_id),
+                "chat": {"id": int(chat_id)},
+                "from": {"id": int(user_id)},
+                "text": str(text),
+            }
+        },
+    )
+    assert response.status_code == 200
+
+
 def _seed_telegram_session(*, customer_id: str, thread_id: str, chat_id: int = 777, user_id: int = 999) -> None:
     from opentulpa.interfaces.telegram.chat_service import STATE_STORE
 
@@ -751,6 +774,45 @@ def test_e2e_immediate_external_write_approve_executes(real_agent_telegram_harne
     new_calls = real_agent_telegram_harness.recorder.kind_slice("internal_api_call", start)
     assert any(item.get("path") == "/internal/approvals/execute" for item in new_calls)
     assert any(item.get("path") == "/internal/tulpa/run_terminal" for item in new_calls)
+
+
+def test_e2e_plaintext_sure_does_not_decide_pending_approval(
+    real_agent_telegram_harness: _Harness,
+) -> None:
+    _seed_telegram_session(
+        customer_id=TEST_CUSTOMER_ID,
+        thread_id="chat-guardrail-write-sure-approve-1",
+        chat_id=777,
+        user_id=999,
+    )
+    start = real_agent_telegram_harness.recorder.count_kind("internal_api_call")
+    first = _chat_turn(
+        harness=real_agent_telegram_harness,
+        thread_id="chat-guardrail-write-sure-approve-1",
+        text="Run external write now: post a test payload to https://mockapi.io/api/v1/posts",
+    )
+    approval_id = _extract_approval_id(str(first.get("text", "")))
+    assert approval_id
+
+    _post_telegram_text(
+        harness=real_agent_telegram_harness,
+        text="sure",
+        chat_id=777,
+        user_id=999,
+        message_id=88,
+    )
+
+    tg_client = real_agent_telegram_harness.telegram_client
+    assert tg_client is not None
+    assert not _wait_until(
+        lambda: any(
+            "approved action executed successfully" in str(item.get("text", "")).lower()
+            for item in tg_client.sent_messages
+        ),
+        timeout_seconds=1.2,
+    )
+    new_calls = real_agent_telegram_harness.recorder.kind_slice("internal_api_call", start)
+    assert not any(item.get("path") == "/internal/approvals/execute" for item in new_calls)
 
 
 def test_e2e_schedule_creation_then_wake_run_skips_guard(

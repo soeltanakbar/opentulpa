@@ -30,3 +30,48 @@ def test_ensure_telegram_webhook_secret_generates_when_missing(monkeypatch) -> N
     generated = entry._ensure_telegram_webhook_secret(settings)
     assert generated
     assert os.environ.get("TELEGRAM_WEBHOOK_SECRET") == generated
+
+
+def test_telegram_bot_commands_include_fresh() -> None:
+    commands = entry._telegram_bot_commands()
+    assert any(str(item.get("command", "")).strip() == "fresh" for item in commands)
+
+
+def test_auto_configure_telegram_commands_posts_set_my_commands(monkeypatch) -> None:
+    called: dict[str, object] = {}
+
+    class _Resp:
+        status_code = 200
+        content = b'{"ok":true}'
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {"ok": True}
+
+    class _Client:
+        def __init__(self, timeout: float) -> None:
+            self.timeout = timeout
+
+        def __enter__(self) -> "_Client":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, json: dict[str, object] | None = None) -> _Resp:
+            called["url"] = url
+            called["json"] = json or {}
+            return _Resp()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "Client", _Client)
+    settings = SimpleNamespace(telegram_bot_token="123:abc")
+    entry._auto_configure_telegram_commands(settings)
+
+    assert str(called.get("url", "")).endswith("/setMyCommands")
+    payload = called.get("json")
+    assert isinstance(payload, dict)
+    commands = payload.get("commands", [])
+    assert isinstance(commands, list)
+    assert any(str(item.get("command", "")).strip() == "fresh" for item in commands if isinstance(item, dict))

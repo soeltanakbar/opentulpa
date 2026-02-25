@@ -11,7 +11,11 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any
 
-from opentulpa.agent.runtime import STREAM_WAIT_SIGNAL, MergedInputSuppressedError
+from opentulpa.agent.runtime import (
+    STREAM_APPROVAL_HANDOFF_SIGNAL,
+    STREAM_WAIT_SIGNAL,
+    MergedInputSuppressedError,
+)
 from opentulpa.core.ids import new_short_id
 from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.interfaces.telegram.constants import DEBUG_LOG_PATH, LOW_SIGNAL_REPLIES
@@ -84,6 +88,8 @@ async def stream_langgraph_reply_to_telegram(
     stream_message_id: int | None = None
     last_streamed = ""
     final_reply = None
+    delivered_any = False
+    progress_notified = False
     client = TelegramClient(bot_token)
     waiting_for_segment = True
     stream_state: dict[str, int | None] = {"message_id": stream_message_id}
@@ -160,6 +166,21 @@ async def stream_langgraph_reply_to_telegram(
             except asyncio.TimeoutError:
                 consecutive_timeouts += 1
                 if consecutive_timeouts < max_consecutive_timeouts:
+                    if not progress_notified:
+                        progress_text = "Still working on this — one sec."
+                        stream_message_id = (
+                            await client.upsert_stream_message(
+                                chat_id=chat_id,
+                                text=progress_text,
+                                message_id=stream_state.get("message_id"),
+                                parse_mode="HTML",
+                            )
+                            or stream_state.get("message_id")
+                        )
+                        stream_state["message_id"] = stream_message_id
+                        if stream_message_id is not None:
+                            delivered_any = True
+                            progress_notified = True
                     # Auto-retry once on transient model/provider stalls before failing user-visible.
                     logger.warning(
                         "telegram.stream timeout_retry chat_id=%s thread_id=%s customer_id=%s stage=%s",
@@ -198,7 +219,11 @@ async def stream_langgraph_reply_to_telegram(
                         or stream_message_id
                     )
                     stream_state["message_id"] = stream_message_id
-                    final_reply = recovered_text
+                    if stream_message_id is not None:
+                        delivered_any = True
+                        final_reply = recovered_text
+                    else:
+                        final_reply = None
                     break
                 timeout_text = (
                     "Still working, but the model response timed out. "
@@ -221,7 +246,11 @@ async def stream_langgraph_reply_to_telegram(
                     or stream_message_id
                 )
                 stream_state["message_id"] = stream_message_id
-                final_reply = timeout_text
+                if stream_message_id is not None:
+                    delivered_any = True
+                    final_reply = timeout_text
+                else:
+                    final_reply = None
                 break
             if isinstance(partial, str) and partial == STREAM_WAIT_SIGNAL:
                 if not waiting_for_segment:
@@ -229,6 +258,11 @@ async def stream_langgraph_reply_to_telegram(
                     last_streamed = ""
                     stream_state["message_id"] = None
                 continue
+            if isinstance(partial, str) and partial == STREAM_APPROVAL_HANDOFF_SIGNAL:
+                # Approval UI delivery is handled out-of-band by approval adapters.
+                suppressed = True
+                final_reply = None
+                break
             if not isinstance(partial, str):
                 continue
             consecutive_timeouts = 0
@@ -252,6 +286,8 @@ async def stream_langgraph_reply_to_telegram(
                 )
                 or stream_message_id
             )
+            if stream_message_id is not None:
+                delivered_any = True
             last_streamed = current
             final_reply = current
             stream_state["message_id"] = stream_message_id
@@ -283,6 +319,8 @@ async def stream_langgraph_reply_to_telegram(
         typing_stop.set()
     with suppress(Exception):
         await typing_task
+    if not suppressed and final_reply and not delivered_any:
+        final_reply = None
     if not suppressed and not final_reply:
         logger.error(
             "telegram.stream no_final_reply chat_id=%s thread_id=%s customer_id=%s",

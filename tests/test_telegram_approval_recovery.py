@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from opentulpa.api.routes.telegram_webhook import _execute_approved_action_and_summarize
+from opentulpa.api.routes.telegram_webhook import (
+    _execute_approved_action_and_summarize,
+    _run_post_approval_execution_flow,
+    _run_post_denial_iteration_flow,
+)
 
 
 class _FakeContextEvents:
@@ -51,6 +55,79 @@ class _FakeRuntime:
         return "I fixed the script path and re-ran setup. Here is your auth link."
 
 
+class _FakeTelegramClient:
+    def __init__(self) -> None:
+        self.sent: list[dict[str, object]] = []
+        self.edited_markup: list[dict[str, object]] = []
+
+    async def send_message(
+        self,
+        *,
+        chat_id: int | str,
+        text: str,
+        parse_mode: str | None = None,
+    ) -> bool:
+        self.sent.append(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": parse_mode,
+            }
+        )
+        return True
+
+    async def edit_message_reply_markup(
+        self,
+        *,
+        chat_id: int | str,
+        message_id: int,
+        reply_markup: dict[str, object] | None = None,
+    ) -> bool:
+        self.edited_markup.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "reply_markup": reply_markup or {},
+            }
+        )
+        return True
+
+    async def send_chat_action(self, *, chat_id: int | str, action: str = "typing") -> bool:
+        _ = (chat_id, action)
+        return True
+
+
+class _FakeApprovals:
+    def __init__(self) -> None:
+        self.flush_calls: list[dict[str, str]] = []
+
+    async def flush_deferred_challenges(
+        self,
+        *,
+        origin_interface: str,
+        origin_conversation_id: str,
+    ) -> int:
+        self.flush_calls.append(
+            {
+                "origin_interface": origin_interface,
+                "origin_conversation_id": origin_conversation_id,
+            }
+        )
+        return 1
+
+
+class _FakeApprovalExecutionOrchestrator:
+    async def execute_group_and_merge(
+        self,
+        *,
+        approval_ids: list[str],
+        decision_payload: dict[str, object],
+        chat_id: int,
+    ) -> str:
+        _ = (approval_ids, decision_payload, chat_id)
+        return "Completed approved actions:\n\ndone"
+
+
 @pytest.mark.asyncio
 async def test_failed_approved_action_uses_autonomous_recovery_message() -> None:
     runtime = _FakeRuntime()
@@ -75,3 +152,58 @@ async def test_failed_approved_action_uses_autonomous_recovery_message() -> None
     ainvoke_calls = [c for c in runtime.calls if c.get("kind") == "ainvoke"]
     assert len(ainvoke_calls) == 1
     assert ainvoke_calls[0].get("recursion_limit_override") == 48
+
+
+@pytest.mark.asyncio
+async def test_post_approval_flow_flushes_deferred_challenges() -> None:
+    client = _FakeTelegramClient()
+    approvals = _FakeApprovals()
+    orchestrator = _FakeApprovalExecutionOrchestrator()
+
+    await _run_post_approval_execution_flow(
+        get_telegram_client=lambda: client,
+        get_approvals=lambda: approvals,
+        get_approval_execution_orchestrator=lambda: orchestrator,
+        approval_ids=["apr_test"],
+        decision_payload={"customer_id": "telegram_42", "thread_id": "chat-42"},
+        chat_id=42,
+        approval_message_id=99,
+    )
+
+    assert approvals.flush_calls == [
+        {
+            "origin_interface": "telegram",
+            "origin_conversation_id": "42",
+        }
+    ]
+    assert any("Completed approved actions" in str(item.get("text", "")) for item in client.sent)
+
+
+@pytest.mark.asyncio
+async def test_post_denial_flow_flushes_deferred_challenges() -> None:
+    runtime = _FakeRuntime()
+    client = _FakeTelegramClient()
+    approvals = _FakeApprovals()
+    decision_payload = {
+        "id": "apr_test",
+        "customer_id": "telegram_42",
+        "thread_id": "chat-42",
+        "action_name": "tulpa_run_terminal",
+        "summary": "post",
+        "action_args": {"command": "curl -X POST https://example.com"},
+    }
+
+    await _run_post_denial_iteration_flow(
+        get_telegram_client=lambda: client,
+        get_agent_runtime=lambda: runtime,
+        get_approvals=lambda: approvals,
+        decision_payload=decision_payload,
+        chat_id=42,
+    )
+
+    assert approvals.flush_calls == [
+        {
+            "origin_interface": "telegram",
+            "origin_conversation_id": "42",
+        }
+    ]

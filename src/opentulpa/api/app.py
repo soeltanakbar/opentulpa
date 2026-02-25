@@ -33,7 +33,6 @@ from opentulpa.application import (
     WakeOrchestrator,
 )
 from opentulpa.approvals.adapters.telegram import TelegramApprovalAdapter
-from opentulpa.approvals.adapters.text_token import TextTokenApprovalAdapter
 from opentulpa.approvals.broker import ApprovalBroker
 from opentulpa.approvals.store import PendingApprovalStore
 from opentulpa.context.customer_profiles import CustomerProfileService
@@ -198,13 +197,11 @@ def create_app(
         approval_db = (PROJECT_ROOT / approval_db).resolve()
     approval_store = PendingApprovalStore(db_path=approval_db)
     telegram_adapter = TelegramApprovalAdapter(client=telegram_client) if telegram_client else None
-    text_token_adapter = TextTokenApprovalAdapter(telegram_client=telegram_client)
     approvals = ApprovalBroker(
         store=approval_store,
         runtime=runtime,
         approval_ttl_minutes=settings.approvals_ttl_minutes,
         adapters={"telegram": telegram_adapter} if telegram_adapter is not None else {},
-        text_token_adapter=text_token_adapter,
         origin_resolver=resolve_approval_origin,
     )
 
@@ -235,6 +232,7 @@ def create_app(
         get_telegram_chat=get_telegram_chat,
         get_telegram_client=get_telegram_client,
         get_agent_runtime=get_agent_runtime,
+        get_approvals=get_approvals,
     )
 
     async def process_wake_event(body: dict[str, Any]) -> None:

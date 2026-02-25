@@ -1164,6 +1164,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         thread_id: str = "",
         execution_origin: str | None = None,
         preapproved: bool = False,
+        guard_context: dict[str, Any] | None = None,
     ) -> Any:
         """Run executable shell/script command through execution-boundary guard."""
         safe_command = str(command or "").strip()
@@ -1182,6 +1183,9 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
             execution_origin=execution_origin,
         )
 
+        guard_payload = guard_context if isinstance(guard_context, dict) else {}
+        previous_user = str(guard_payload.get("previous_user_message", "")).strip()
+        previous_assistant = str(guard_payload.get("previous_assistant_message", "")).strip()
         decision = await boundary_guard.evaluate(
             ExecutionBoundaryContext(
                 customer_id=safe_customer,
@@ -1197,7 +1201,9 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
                 preapproved=bool(preapproved),
                 action_note=(
                     "Execution-boundary guard check for terminal/script action. "
-                    "Decide based on full command external write side effects."
+                    "Decide based on full command external write side effects. "
+                    f"previous_user_message={previous_user[:800]} "
+                    f"previous_assistant_message={previous_assistant[:800]}"
                 ),
             )
         )
@@ -1324,6 +1330,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         thread_id: str = "",
         execution_origin: str | None = None,
         preapproved: bool = False,
+        guard_context: dict[str, Any] | None = None,
     ) -> Any:
         """
         Create a scheduled routine.
@@ -1363,6 +1370,9 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
             execution_origin=execution_origin,
         )
 
+        guard_payload = guard_context if isinstance(guard_context, dict) else {}
+        previous_user = str(guard_payload.get("previous_user_message", "")).strip()
+        previous_assistant = str(guard_payload.get("previous_assistant_message", "")).strip()
         decision = await boundary_guard.evaluate(
             ExecutionBoundaryContext(
                 customer_id=safe_customer,
@@ -1380,7 +1390,9 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
                 preapproved=bool(preapproved),
                 action_note=(
                     "Routine creation with planned implementation command. "
-                    "Classify external write side effects for future scheduled behavior."
+                    "Classify external write side effects for future scheduled behavior. "
+                    f"previous_user_message={previous_user[:800]} "
+                    f"previous_assistant_message={previous_assistant[:800]}"
                 ),
             )
         )

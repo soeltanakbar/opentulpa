@@ -108,6 +108,8 @@ def build_runtime_graph(runtime: Any):
             "If a tool fails, self-repair once with a low-risk correction and retry. "
             "Do not output vague preambles; give concrete updates. "
             "Default to concise answers: keep responses short and direct unless the user asks for depth. "
+            "For casual/non-work conversation, keep replies extremely brief (1-2 short sentences, no paragraphs) "
+            "unless the user explicitly asks for a longer response. "
             "When a user gives persistent behavior preferences (style, coding approach, process), "
             "call directive_set with a concise durable directive summary before your response. "
             "If the user asks to forget/reset old preferences, call directive_clear first. "
@@ -127,6 +129,9 @@ def build_runtime_graph(runtime: Any):
             "When creating automations that depend on generated files, include cleanup_paths "
             "in routine_create so later cleanup can be deterministic. "
             "If user tells you their timezone or UTC offset, call time_profile_set. "
+            "Precedence model: active persona/directive should dominate response style and content framing. "
+            "Safety/guardrail policy should constrain actions and disallowed outputs, but should not force a "
+            "tone reset into generic policy language when a concise in-persona refusal/alternative is possible. "
             "Tool-selection policy: "
             "1) If user gives a specific webpage URL to read, call fetch_url_content first. "
             "2) If user gives a direct file URL (pdf/docx/image), call fetch_file_content. "
@@ -172,8 +177,9 @@ def build_runtime_graph(runtime: Any):
             "If the user asks what you can do/capabilities, include concrete integration capabilities: "
             "setting/storing API keys from Telegram setup flows, building new service integrations by writing code, "
             "scheduling periodic polling jobs, and producing change summaries/alerts from API or web data. "
-            "If a tool returns APPROVAL_PENDING with an approval_id, ask the user to approve it and then call "
-            "guardrail_execute_approved_action with that approval_id. "
+            "If a tool returns APPROVAL_PENDING with an approval_id, do not ask for written approval text. "
+            "State that approval is pending and must be decided through the approval UI buttons. "
+            "Do not call guardrail_execute_approved_action unless the approval is already approved/executable. "
             "When a tool returns APPROVAL_PENDING, describe it as pending/requested only. "
             "Never say an action was already created/updated/deleted/executed in that same message. "
             "Guardrail model: approval checks happen at execution boundary tools (terminal/script execution and "
@@ -340,7 +346,23 @@ def build_runtime_graph(runtime: Any):
                 for msg in prompt_messages
             )
         history_budget = max(800, prompt_budget - prompt_overhead_tokens)
-        bounded_messages = _tail_messages_to_token_budget(messages, token_budget=history_budget)
+        sanitized_history: list[AnyMessage] = []
+        for msg in messages:
+            if isinstance(msg, ToolMessage):
+                tool_text = _content_to_text(getattr(msg, "content", "")).strip().lower()
+                # Keep approval orchestration out of model-visible history.
+                if (
+                    "approval_pending" in tool_text
+                    or "approval_handoff" in tool_text
+                    or '"status":"approval_pending"' in tool_text
+                    or '"status": "approval_pending"' in tool_text
+                ):
+                    continue
+            sanitized_history.append(msg)
+        bounded_messages = _tail_messages_to_token_budget(
+            sanitized_history,
+            token_budget=history_budget,
+        )
         _log(
             state,
             "graph.agent.prompt_ready",
@@ -503,7 +525,18 @@ def build_runtime_graph(runtime: Any):
             requested_tool_calls=len(last.tool_calls),
             execution_origin=("scheduled" if scheduled_origin else "interactive"),
         )
+
+        latest_user_for_guard = _latest_user_text(messages)
+        prior_assistant_for_guard = ""
+        for msg in reversed(messages[:-1]):
+            if isinstance(msg, AIMessage):
+                candidate = _content_to_text(getattr(msg, "content", "")).strip()
+                if candidate:
+                    prior_assistant_for_guard = candidate
+                    break
+
         tool_messages: list[ToolMessage] = []
+        approval_handoff = False
         had_error = False
         for call in last.tool_calls:
             call_name = str(call.get("name", ""))
@@ -544,6 +577,10 @@ def build_runtime_graph(runtime: Any):
                         **args,
                         "thread_id": thread_id,
                         "execution_origin": "scheduled" if scheduled_origin else "interactive",
+                        "guard_context": {
+                            "previous_user_message": latest_user_for_guard[:2000],
+                            "previous_assistant_message": prior_assistant_for_guard[:2000],
+                        },
                     }
                 if call_name == "routine_create":
                     latest_user = _latest_user_text(messages)
@@ -573,7 +610,22 @@ def build_runtime_graph(runtime: Any):
                     tool_call_id=call_id,
                     result_chars=len(result_text),
                 )
-                tool_messages.append(ToolMessage(content=_safe_json(result), tool_call_id=call_id))
+                if (
+                    isinstance(result, dict)
+                    and str(result.get("status", "")).strip().lower() == "approval_pending"
+                    and str(result.get("approval_id", "")).strip()
+                ):
+                    approval_handoff = True
+                    # Keep only a compact marker; do not feed guard approval text back into model context.
+                    tool_messages.append(ToolMessage(content="APPROVAL_HANDOFF", tool_call_id=call_id))
+                    _log(
+                        state,
+                        "graph.tools.approval_handoff",
+                        tool_name=call_name,
+                        tool_call_id=call_id,
+                    )
+                else:
+                    tool_messages.append(ToolMessage(content=_safe_json(result), tool_call_id=call_id))
             except Exception as exc:
                 had_error = True
                 _log(
@@ -589,7 +641,7 @@ def build_runtime_graph(runtime: Any):
                         tool_call_id=call_id,
                     )
                 )
-        update: dict[str, Any] = {"messages": tool_messages}
+        update: dict[str, Any] = {"messages": tool_messages, "approval_handoff": approval_handoff}
         if had_error:
             update["tool_error_count"] = int(state.get("tool_error_count", 0)) + 1
             update["last_tool_error"] = "tool execution failed"
@@ -853,6 +905,11 @@ def build_runtime_graph(runtime: Any):
             return "tools"
         return "agent"
 
+    def route_after_tools(state: AgentState) -> Literal["agent", END]:
+        if bool(state.get("approval_handoff", False)):
+            return END
+        return "agent"
+
     def route_after_claim_check(state: AgentState) -> Literal["agent", END]:
         if bool(state.get("claim_check_needs_retry", False)):
             return "agent"
@@ -870,6 +927,6 @@ def build_runtime_graph(runtime: Any):
     builder.add_edge(START, "agent")
     builder.add_conditional_edges("agent", route_after_agent, ["validate_tools", "claim_check"])
     builder.add_conditional_edges("validate_tools", route_after_validate, ["tools", "agent"])
-    builder.add_edge("tools", "agent")
+    builder.add_conditional_edges("tools", route_after_tools, ["agent", END])
     builder.add_conditional_edges("claim_check", route_after_claim_check, ["agent", END])
     return builder.compile(checkpointer=runtime._checkpointer)
