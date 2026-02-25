@@ -124,6 +124,34 @@ class PendingApprovalStore:
             return None
         return self._row_to_record(row)
 
+    def list_pending_for_origin(
+        self,
+        *,
+        origin_interface: str,
+        origin_user_id: str,
+        origin_conversation_id: str,
+        limit: int = 5,
+    ) -> list[ApprovalRecord]:
+        self.expire_due()
+        iface = str(origin_interface or "").strip()
+        uid = str(origin_user_id or "").strip()
+        conv = str(origin_conversation_id or "").strip()
+        if not iface or not uid or not conv:
+            return []
+        safe_limit = max(1, min(int(limit), 20))
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM pending_approvals
+                WHERE origin_interface=? AND origin_user_id=? AND origin_conversation_id=? AND status='pending'
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (iface, uid, conv, safe_limit),
+            ).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
     def find_pending_duplicate(
         self,
         *,

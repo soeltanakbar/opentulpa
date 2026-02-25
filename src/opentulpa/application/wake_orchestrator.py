@@ -20,12 +20,14 @@ class WakeOrchestrator:
         get_telegram_chat: Callable[[], Any],
         get_telegram_client: Callable[[], Any],
         get_agent_runtime: Callable[[], Any],
+        get_approvals: Callable[[], Any] | None = None,
     ) -> None:
         self._settings = settings
         self._get_context_events = get_context_events
         self._get_telegram_chat = get_telegram_chat
         self._get_telegram_client = get_telegram_client
         self._get_agent_runtime = get_agent_runtime
+        self._get_approvals = get_approvals
 
     def _backlog(self, *, customer_id: str, source: str, event_type: str, payload: dict[str, Any]) -> None:
         self._get_context_events().add_event(
@@ -34,6 +36,15 @@ class WakeOrchestrator:
             event_type=event_type,
             payload=payload,
         )
+
+    async def _flush_deferred_challenges(self, *, chat_id: int | str) -> None:
+        if self._get_approvals is None:
+            return
+        with suppress(Exception):
+            await self._get_approvals().flush_deferred_challenges(
+                origin_interface="telegram",
+                origin_conversation_id=str(chat_id),
+            )
 
     async def handle_event(self, body: dict[str, Any]) -> None:
         wake_type = str(body.get("type", "")).strip()
@@ -100,6 +111,7 @@ class WakeOrchestrator:
             )
             with suppress(Exception):
                 self._get_telegram_chat().touch_assistant_message(int(item["chat_id"]))
+            await self._flush_deferred_challenges(chat_id=item["chat_id"])
 
     async def _handle_task_event(self, body: dict[str, Any]) -> None:
         customer_id = str(body.get("customer_id", "")).strip()
@@ -168,6 +180,7 @@ class WakeOrchestrator:
                 text=item["text"],
                 parse_mode="HTML",
             )
+            await self._flush_deferred_challenges(chat_id=item["chat_id"])
 
     async def _handle_routine_event(self, body: dict[str, Any]) -> None:
         payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
@@ -240,3 +253,4 @@ class WakeOrchestrator:
             )
             with suppress(Exception):
                 self._get_telegram_chat().touch_assistant_message(int(item["chat_id"]))
+            await self._flush_deferred_challenges(chat_id=item["chat_id"])

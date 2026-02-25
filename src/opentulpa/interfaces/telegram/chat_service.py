@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from opentulpa.context.file_vault import FileVaultService
+from opentulpa.core.ids import new_short_id
 from opentulpa.interfaces.telegram.attachments import (
     build_uploaded_files_context,
     extract_attachments,
@@ -91,6 +92,41 @@ def _inject_voice_message_context(text: str, transcripts: list[str]) -> str:
     return voice_block
 
 
+def _reset_chat_session_context(
+    state: dict[str, Any],
+    *,
+    chat_id: int,
+    user_id: int,
+) -> tuple[str, str]:
+    sessions = state.get("sessions")
+    if not isinstance(sessions, dict):
+        sessions = {}
+    chat_key = str(chat_id)
+    slot = sessions.get(chat_key)
+    if not isinstance(slot, dict):
+        slot = {}
+    customer_id = str(slot.get("customer_id", "")).strip() or f"telegram_{user_id}"
+    now_utc_iso = datetime.now(timezone.utc).isoformat()
+    thread_id = new_short_id("chat")
+    wake_thread_id = new_short_id("wake")
+    sessions[chat_key] = {
+        "user_id": int(user_id),
+        "customer_id": customer_id,
+        "thread_id": thread_id,
+        "wake_thread_id": wake_thread_id,
+        "last_user_message_at": now_utc_iso,
+        "last_assistant_message_at": None,
+    }
+    state["sessions"] = sessions
+
+    pending_map = state.get("pending_key_by_chat")
+    if not isinstance(pending_map, dict):
+        pending_map = {}
+    pending_map.pop(chat_key, None)
+    state["pending_key_by_chat"] = pending_map
+    return thread_id, customer_id
+
+
 def _start_help_text() -> str:
     return (
         "OpenTulpa is connected.\n\n"
@@ -109,6 +145,7 @@ def _start_help_text() -> str:
         "/setup\n"
         "/set KEY VALUE\n"
         "/setenv KEY VALUE\n"
+        "/fresh\n"
         "/cancel"
     )
 
@@ -220,6 +257,19 @@ async def handle_telegram_text(
 
         STATE_STORE.update(_clear_pending)
         return "Cancelled pending setup."
+    if text_lower == "/fresh":
+        thread_id, _ = STATE_STORE.update(
+            lambda state: _reset_chat_session_context(
+                state,
+                chat_id=ctx.chat_id,
+                user_id=ctx.user_id,
+            )
+        )
+        return (
+            "Started a fresh chat context. "
+            f"New thread: {thread_id}. "
+            "Your long-term memory is unchanged."
+        )
 
     if text_lower == "/setup":
         if not is_admin:

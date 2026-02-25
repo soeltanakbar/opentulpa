@@ -98,6 +98,18 @@ def _ensure_telegram_webhook_secret(settings: Any) -> str:
     return generated
 
 
+def _telegram_bot_commands() -> list[dict[str, str]]:
+    return [
+        {"command": "start", "description": "Show quick help and onboarding"},
+        {"command": "status", "description": "Check bot and agent status"},
+        {"command": "setup", "description": "Start key setup flow"},
+        {"command": "set", "description": "Set env key: /set KEY VALUE"},
+        {"command": "setenv", "description": "Set env key: /setenv KEY VALUE"},
+        {"command": "fresh", "description": "Start a fresh chat context"},
+        {"command": "cancel", "description": "Cancel pending setup"},
+    ]
+
+
 def _auto_configure_telegram_webhook(settings: Any) -> None:
     bot_token = str(settings.telegram_bot_token or "").strip()
     if not bot_token:
@@ -135,6 +147,37 @@ def _auto_configure_telegram_webhook(settings: Any) -> None:
             )
     except Exception as exc:
         print(f"Telegram webhook auto-config failed: {exc}", file=sys.stderr)
+
+
+def _auto_configure_telegram_commands(settings: Any) -> None:
+    bot_token = str(settings.telegram_bot_token or "").strip()
+    if not bot_token:
+        return
+    payload = {"commands": _telegram_bot_commands()}
+    try:
+        import httpx
+
+        with httpx.Client(timeout=10.0) as client:
+            response = client.post(
+                f"https://api.telegram.org/bot{bot_token}/setMyCommands",
+                json=payload,
+            )
+        if response.status_code != 200:
+            print(
+                f"Telegram commands auto-config failed: HTTP {response.status_code} {response.text[:160]}",
+                file=sys.stderr,
+            )
+            return
+        data = response.json() if response.content else {}
+        if bool(data.get("ok")):
+            print("Telegram bot commands configured.")
+        else:
+            print(
+                f"Telegram commands auto-config failed: {data.get('description', 'unknown error')}",
+                file=sys.stderr,
+            )
+    except Exception as exc:
+        print(f"Telegram commands auto-config failed: {exc}", file=sys.stderr)
 
 
 def main() -> None:
@@ -230,6 +273,7 @@ def main() -> None:
         skill_store_service=skill_store,
     )
     _auto_configure_telegram_webhook(settings)
+    _auto_configure_telegram_commands(settings)
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
 
 

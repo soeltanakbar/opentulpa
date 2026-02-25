@@ -36,19 +36,6 @@ def _parse_approval_callback_data(data: str) -> tuple[str, str] | None:
     return match.group(1), match.group(2).lower()
 
 
-def _parse_text_token_decision(text: str) -> tuple[str, str] | None:
-    raw = str(text or "").strip()
-    # Formats: /approve apr_xxx | /deny apr_xxx
-    match = re.fullmatch(
-        r"/?(approve|deny)\s+([a-z0-9_-]{6,40})",
-        raw,
-        re.IGNORECASE,
-    )
-    if not match:
-        return None
-    return match.group(2), match.group(1).lower()
-
-
 async def _execute_approved_action_and_summarize(
     *,
     get_agent_runtime: Callable[[], Any],
@@ -85,6 +72,7 @@ async def _emit_typing_until_done(
 async def _run_post_approval_execution_flow(
     *,
     get_telegram_client: Callable[[], Any],
+    get_approvals: Callable[[], Any] | None,
     get_approval_execution_orchestrator: Callable[[], Any],
     approval_ids: list[str],
     decision_payload: dict[str, Any],
@@ -127,11 +115,19 @@ async def _run_post_approval_execution_flow(
     with suppress(Exception):
         await client.send_message(chat_id=chat_id, text=final_outcome, parse_mode="HTML")
 
+    if get_approvals is not None:
+        with suppress(Exception):
+            await get_approvals().flush_deferred_challenges(
+                origin_interface="telegram",
+                origin_conversation_id=str(chat_id),
+            )
+
 
 async def _run_post_denial_iteration_flow(
     *,
     get_telegram_client: Callable[[], Any],
     get_agent_runtime: Callable[[], Any],
+    get_approvals: Callable[[], Any] | None,
     decision_payload: dict[str, Any],
     chat_id: int,
 ) -> None:
@@ -159,6 +155,12 @@ async def _run_post_denial_iteration_flow(
                 text=fallback_text,
                 parse_mode="HTML",
             )
+        if get_approvals is not None:
+            with suppress(Exception):
+                await get_approvals().flush_deferred_challenges(
+                    origin_interface="telegram",
+                    origin_conversation_id=str(chat_id),
+                )
         return
     prompt = (
         "System update: The user denied your planned action.\n"
@@ -189,6 +191,12 @@ async def _run_post_denial_iteration_flow(
             text=safe_reply,
             parse_mode="HTML",
         )
+    if get_approvals is not None:
+        with suppress(Exception):
+            await get_approvals().flush_deferred_challenges(
+                origin_interface="telegram",
+                origin_conversation_id=str(chat_id),
+            )
 
 
 def register_telegram_webhook_routes(
@@ -202,7 +210,7 @@ def register_telegram_webhook_routes(
     get_approval_execution_orchestrator: Callable[[], Any],
     decide_approval_and_maybe_wake: Callable[..., Awaitable[dict[str, Any]]],
 ) -> None:
-    """Register Telegram webhook with callback + text-token approval support."""
+    """Register Telegram webhook with callback-driven approval support."""
 
     @app.post("/webhook/telegram")
     async def telegram_webhook(request: Request, background_tasks: BackgroundTasks) -> Response:
@@ -256,6 +264,7 @@ def register_telegram_webhook_routes(
             if approved:
                 await _run_post_approval_execution_flow(
                     get_telegram_client=get_telegram_client,
+                    get_approvals=get_approvals,
                     get_approval_execution_orchestrator=get_approval_execution_orchestrator,
                     approval_ids=[approval_id],
                     decision_payload=result if isinstance(result, dict) else {},
@@ -275,6 +284,7 @@ def register_telegram_webhook_routes(
                 await _run_post_denial_iteration_flow(
                     get_telegram_client=get_telegram_client,
                     get_agent_runtime=get_agent_runtime,
+                    get_approvals=get_approvals,
                     decision_payload=result if isinstance(result, dict) else {},
                     chat_id=callback_chat_id,
                 )
@@ -291,50 +301,7 @@ def register_telegram_webhook_routes(
 
         message = body.get("message") or body.get("edited_message") or {}
         chat_id = message.get("chat", {}).get("id")
-        _, user_id, text = parse_telegram_update(body)
-        token_decision = _parse_text_token_decision(text or "")
-        if token_decision and chat_id is not None and user_id is not None:
-            approval_id, requested_decision = token_decision
-            result = await decide_approval_and_maybe_wake(
-                approval_id=approval_id,
-                decision=requested_decision,
-                actor_interface="telegram",
-                actor_id=str(user_id),
-                enqueue_wake=False,
-            )
-            approved = bool(result.get("ok")) and str(result.get("status", "")).strip() == "approved"
-            denied = bool(result.get("ok")) and str(result.get("status", "")).strip() == "denied"
-            if approved:
-                await _run_post_approval_execution_flow(
-                    get_telegram_client=get_telegram_client,
-                    get_approval_execution_orchestrator=get_approval_execution_orchestrator,
-                    approval_ids=[approval_id],
-                    decision_payload=result if isinstance(result, dict) else {},
-                    chat_id=int(chat_id),
-                )
-            else:
-                reply_text = (
-                    "Action denied."
-                    if denied
-                    else (
-                        f"Approval {requested_decision} failed: "
-                        f"{result.get('reason', 'not_allowed')}"
-                    )
-                )
-                with suppress(Exception):
-                    await get_telegram_client().send_message(
-                        chat_id=chat_id,
-                        text=reply_text,
-                        parse_mode="HTML",
-                    )
-                if denied:
-                    await _run_post_denial_iteration_flow(
-                        get_telegram_client=get_telegram_client,
-                        get_agent_runtime=get_agent_runtime,
-                        decision_payload=result if isinstance(result, dict) else {},
-                        chat_id=int(chat_id),
-                    )
-            return
+        _ = parse_telegram_update(body)
 
         try:
             reply = await get_telegram_chat().handle_update(

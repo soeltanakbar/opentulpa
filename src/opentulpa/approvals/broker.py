@@ -57,14 +57,12 @@ class ApprovalBroker:
         runtime: Any | None = None,
         approval_ttl_minutes: int = 10,
         adapters: dict[str, ApprovalAdapter] | None = None,
-        text_token_adapter: ApprovalAdapter | None = None,
         origin_resolver: Callable[[str, str], dict[str, Any]] | None = None,
     ) -> None:
         self._store = store
         self._evaluator = ApprovalEvaluator(runtime=runtime)
         self._ttl_seconds = max(60, min(int(approval_ttl_minutes), 120)) * 60
         self._adapters = adapters or {}
-        self._text_token_adapter = text_token_adapter
         self._origin_resolver = origin_resolver
 
     def _resolve_origin(
@@ -118,13 +116,6 @@ class ApprovalBroker:
             if sent:
                 return adapter.name
 
-        if self._text_token_adapter is not None:
-            try:
-                sent = await self._text_token_adapter.send_challenge(record)
-            except Exception:
-                sent = False
-            if sent:
-                return self._text_token_adapter.name
         return None
 
     async def evaluate_action(
@@ -237,6 +228,27 @@ class ApprovalBroker:
 
     def get(self, approval_id: str) -> dict[str, Any] | None:
         return self._store.as_dict(self._store.get(approval_id))
+
+    def list_pending_for_origin(
+        self,
+        *,
+        origin_interface: str,
+        origin_user_id: str,
+        origin_conversation_id: str,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        records = self._store.list_pending_for_origin(
+            origin_interface=origin_interface,
+            origin_user_id=origin_user_id,
+            origin_conversation_id=origin_conversation_id,
+            limit=limit,
+        )
+        out: list[dict[str, Any]] = []
+        for record in records:
+            payload = self._store.as_dict(record)
+            if isinstance(payload, dict):
+                out.append(payload)
+        return out
 
     async def decide(
         self,
