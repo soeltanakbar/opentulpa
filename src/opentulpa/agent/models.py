@@ -20,5 +20,6 @@ class AgentState(TypedDict, total=False):
     tool_validation_passed: bool
     tool_error_count: int
     last_tool_error: str
+    approval_handoff: bool
     claim_check_needs_retry: bool
     claim_check_retry_count: int

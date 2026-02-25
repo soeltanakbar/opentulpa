@@ -57,7 +57,7 @@ from opentulpa.agent.file_analysis import (
 )
 from opentulpa.agent.graph_builder import build_runtime_graph
 from opentulpa.agent.internal_api_client import InternalApiClient
-from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage
+from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.runtime_input import (
     MergedInputSuppressedError,
     ThreadInputCoordinator,
@@ -84,6 +84,7 @@ from opentulpa.core.ids import new_short_id
 logger = logging.getLogger(__name__)
 _LINK_ID_TOKEN_RE = re.compile(r"\blink_[A-Za-z0-9]{4,12}\b")
 STREAM_WAIT_SIGNAL = "__TULPA_STREAM_WAIT__"
+STREAM_APPROVAL_HANDOFF_SIGNAL = "__TULPA_APPROVAL_HANDOFF__"
 STREAM_EMPTY_REPLY_FALLBACK = (
     "I couldn't produce a visible user-facing reply for that step. "
     "Please retry, and I will continue from the latest state."
@@ -391,6 +392,28 @@ class OpenTulpaLangGraphRuntime:
             f"User message:\n{text}"
         )
         return wrapped, through_id
+
+    async def _has_pending_approval_lock(self, *, customer_id: str, thread_id: str) -> bool:
+        cid = str(customer_id or "").strip()
+        tid = str(thread_id or "").strip()
+        if not cid or not tid:
+            return False
+        try:
+            response = await self._request_with_backoff(
+                "GET",
+                "/internal/approvals/pending/status",
+                params={"customer_id": cid, "thread_id": tid},
+                timeout=5.0,
+                retries=0,
+            )
+        except Exception:
+            return False
+        if response.status_code != 200:
+            return False
+        with suppress(Exception):
+            payload = response.json()
+            return bool(payload.get("pending", False))
+        return False
 
     def register_links_from_text(
         self,
@@ -954,6 +977,15 @@ class OpenTulpaLangGraphRuntime:
                 text=effective_text,
                 include_pending_context=include_pending_context,
             )
+            if await self._has_pending_approval_lock(customer_id=customer_id, thread_id=thread_id):
+                self.log_behavior_event(
+                    event="turn_blocked_pending_approval",
+                    trace_id=turn_trace_id,
+                    mode="ainvoke",
+                    thread_id=thread_id,
+                    customer_id=customer_id,
+                )
+                return ""
             self.register_links_from_text(
                 customer_id=customer_id,
                 text=merged_text,
@@ -981,12 +1013,22 @@ class OpenTulpaLangGraphRuntime:
                     "thread_id": thread_id,
                     "agent_trace_id": turn_trace_id,
                     "tool_error_count": 0,
+                    "approval_handoff": False,
                     "claim_check_retry_count": 0,
                     "claim_check_needs_retry": False,
                     **skill_state,
                 },
                 config=config,
             )
+            if bool(result.get("approval_handoff", False)):
+                self.log_behavior_event(
+                    event="turn_approval_handoff",
+                    trace_id=turn_trace_id,
+                    mode="ainvoke",
+                    thread_id=thread_id,
+                    customer_id=customer_id,
+                )
+                return ""
             messages = result.get("messages", [])
             for message in reversed(messages):
                 if isinstance(message, AIMessage) and (message.content or "").strip():
@@ -1098,6 +1140,17 @@ class OpenTulpaLangGraphRuntime:
                 text=effective_text,
                 include_pending_context=include_pending_context,
             )
+            if await self._has_pending_approval_lock(customer_id=customer_id, thread_id=thread_id):
+                yielded_any = True
+                self.log_behavior_event(
+                    event="turn_blocked_pending_approval",
+                    trace_id=turn_trace_id,
+                    mode="astream",
+                    thread_id=thread_id,
+                    customer_id=customer_id,
+                )
+                yield STREAM_APPROVAL_HANDOFF_SIGNAL
+                return
             self.register_links_from_text(
                 customer_id=customer_id,
                 text=merged_text,
@@ -1115,6 +1168,7 @@ class OpenTulpaLangGraphRuntime:
             yielded_any = False
             saw_agent_output = False
             in_tool_phase = False
+            approval_handoff_detected = False
 
             def _finalize_segment() -> None:
                 nonlocal segment_accumulated
@@ -1148,6 +1202,10 @@ class OpenTulpaLangGraphRuntime:
             ):
                 node_name = str(metadata.get("langgraph_node", "")).strip().lower()
                 if node_name != "agent":
+                    if node_name == "tools":
+                        tool_text = _content_to_text(getattr(message_chunk, "content", "")).strip()
+                        if isinstance(message_chunk, ToolMessage) and tool_text == "APPROVAL_HANDOFF":
+                            approval_handoff_detected = True
                     if saw_agent_output and not in_tool_phase:
                         in_tool_phase = True
                         _finalize_segment()
@@ -1180,6 +1238,16 @@ class OpenTulpaLangGraphRuntime:
             if through_id is not None and self._context_events is not None:
                 self._context_events.clear_events(customer_id, through_id=through_id)
             _finalize_segment()
+            if not yielded_any and approval_handoff_detected:
+                yielded_any = True
+                self.log_behavior_event(
+                    event="turn_approval_handoff",
+                    trace_id=turn_trace_id,
+                    mode="astream",
+                    thread_id=thread_id,
+                    customer_id=customer_id,
+                )
+                yield STREAM_APPROVAL_HANDOFF_SIGNAL
             if not yielded_any:
                 logger.warning(
                     "runtime.astream_text no_visible_chunks thread_id=%s customer_id=%s; invoking fallback",
@@ -1199,12 +1267,24 @@ class OpenTulpaLangGraphRuntime:
                         "thread_id": thread_id,
                         "agent_trace_id": turn_trace_id,
                         "tool_error_count": 0,
+                        "approval_handoff": False,
                         "claim_check_retry_count": 0,
                         "claim_check_needs_retry": False,
                         **skill_state,
                     },
                     config=config,
                 )
+                if bool(fallback_result.get("approval_handoff", False)):
+                    yielded_any = True
+                    self.log_behavior_event(
+                        event="turn_approval_handoff",
+                        trace_id=turn_trace_id,
+                        mode="astream",
+                        thread_id=thread_id,
+                        customer_id=customer_id,
+                    )
+                    yield STREAM_APPROVAL_HANDOFF_SIGNAL
+                    fallback_result = {"messages": []}
                 fallback_messages = fallback_result.get("messages", [])
                 fallback_yielded = False
                 for message in reversed(fallback_messages):
@@ -1367,12 +1447,15 @@ class OpenTulpaLangGraphRuntime:
                             "- applies=true only if assistant explicitly claims something was already done/launched/sent/posted/scheduled now.\n"
                             "- applies=true if assistant commits to an immediate follow-up action in this same turn "
                             "(e.g., 'doing this now', 'retrying now', 'give me a moment') that should produce tool evidence.\n"
+                            "- applies=true if assistant asks the user to approve/deny or says approval is pending now.\n"
                             "- If user_message asks only for an outcome/failure summary, assistant must not promise "
                             "new immediate execution unless tool evidence exists in this turn.\n"
-                            "- If assistant is future-tense, conditional, or says approval is pending, set applies=false and mismatch=false.\n"
+                            "- If assistant is future-tense or conditional without immediate-action claims, set applies=false and mismatch=false.\n"
                             "- mismatch=true only when there is a clear immediate completion claim without matching success evidence in tool outputs.\n"
                             "- mismatch=true when assistant commits immediate follow-up execution now but no matching tool evidence exists.\n"
                             "- If assistant claims completed/updated/created/scheduled now AND also states approval is pending, set mismatch=true.\n"
+                            "- If assistant asks for approval (or says approval is pending) but tool evidence lacks a pending-approval artifact "
+                            "(e.g., approval_id, APPROVAL_PENDING, or explicit pending challenge), set mismatch=true.\n"
                             "- If evidence is ambiguous/partial, prefer mismatch=false.\n"
                             "- If tool outputs show approval pending, denial, or tool error while assistant claims success now, mismatch=true.\n"
                             "- repair_instruction should tell the agent to either run the missing tool now or restate status honestly.\n"

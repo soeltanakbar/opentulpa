@@ -346,7 +346,23 @@ def build_runtime_graph(runtime: Any):
                 for msg in prompt_messages
             )
         history_budget = max(800, prompt_budget - prompt_overhead_tokens)
-        bounded_messages = _tail_messages_to_token_budget(messages, token_budget=history_budget)
+        sanitized_history: list[AnyMessage] = []
+        for msg in messages:
+            if isinstance(msg, ToolMessage):
+                tool_text = _content_to_text(getattr(msg, "content", "")).strip().lower()
+                # Keep approval orchestration out of model-visible history.
+                if (
+                    "approval_pending" in tool_text
+                    or "approval_handoff" in tool_text
+                    or '"status":"approval_pending"' in tool_text
+                    or '"status": "approval_pending"' in tool_text
+                ):
+                    continue
+            sanitized_history.append(msg)
+        bounded_messages = _tail_messages_to_token_budget(
+            sanitized_history,
+            token_budget=history_budget,
+        )
         _log(
             state,
             "graph.agent.prompt_ready",
@@ -520,6 +536,7 @@ def build_runtime_graph(runtime: Any):
                     break
 
         tool_messages: list[ToolMessage] = []
+        approval_handoff = False
         had_error = False
         for call in last.tool_calls:
             call_name = str(call.get("name", ""))
@@ -593,7 +610,22 @@ def build_runtime_graph(runtime: Any):
                     tool_call_id=call_id,
                     result_chars=len(result_text),
                 )
-                tool_messages.append(ToolMessage(content=_safe_json(result), tool_call_id=call_id))
+                if (
+                    isinstance(result, dict)
+                    and str(result.get("status", "")).strip().lower() == "approval_pending"
+                    and str(result.get("approval_id", "")).strip()
+                ):
+                    approval_handoff = True
+                    # Keep only a compact marker; do not feed guard approval text back into model context.
+                    tool_messages.append(ToolMessage(content="APPROVAL_HANDOFF", tool_call_id=call_id))
+                    _log(
+                        state,
+                        "graph.tools.approval_handoff",
+                        tool_name=call_name,
+                        tool_call_id=call_id,
+                    )
+                else:
+                    tool_messages.append(ToolMessage(content=_safe_json(result), tool_call_id=call_id))
             except Exception as exc:
                 had_error = True
                 _log(
@@ -609,7 +641,7 @@ def build_runtime_graph(runtime: Any):
                         tool_call_id=call_id,
                     )
                 )
-        update: dict[str, Any] = {"messages": tool_messages}
+        update: dict[str, Any] = {"messages": tool_messages, "approval_handoff": approval_handoff}
         if had_error:
             update["tool_error_count"] = int(state.get("tool_error_count", 0)) + 1
             update["last_tool_error"] = "tool execution failed"
@@ -873,6 +905,11 @@ def build_runtime_graph(runtime: Any):
             return "tools"
         return "agent"
 
+    def route_after_tools(state: AgentState) -> Literal["agent", END]:
+        if bool(state.get("approval_handoff", False)):
+            return END
+        return "agent"
+
     def route_after_claim_check(state: AgentState) -> Literal["agent", END]:
         if bool(state.get("claim_check_needs_retry", False)):
             return "agent"
@@ -890,6 +927,6 @@ def build_runtime_graph(runtime: Any):
     builder.add_edge(START, "agent")
     builder.add_conditional_edges("agent", route_after_agent, ["validate_tools", "claim_check"])
     builder.add_conditional_edges("validate_tools", route_after_validate, ["tools", "agent"])
-    builder.add_edge("tools", "agent")
+    builder.add_conditional_edges("tools", route_after_tools, ["agent", END])
     builder.add_conditional_edges("claim_check", route_after_claim_check, ["agent", END])
     return builder.compile(checkpointer=runtime._checkpointer)

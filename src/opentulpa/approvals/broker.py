@@ -250,6 +250,14 @@ class ApprovalBroker:
                 out.append(payload)
         return out
 
+    def has_pending_for_customer_thread(self, *, customer_id: str, thread_id: str) -> bool:
+        return bool(
+            self._store.has_pending_for_customer_thread(
+                customer_id=customer_id,
+                thread_id=thread_id,
+            )
+        )
+
     async def decide(
         self,
         *,

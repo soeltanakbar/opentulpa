@@ -152,6 +152,29 @@ class PendingApprovalStore:
             ).fetchall()
         return [self._row_to_record(row) for row in rows]
 
+    def has_pending_for_customer_thread(
+        self,
+        *,
+        customer_id: str,
+        thread_id: str,
+    ) -> bool:
+        self.expire_due()
+        cid = str(customer_id or "").strip()
+        tid = str(thread_id or "").strip()
+        if not cid or not tid:
+            return False
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM pending_approvals
+                WHERE customer_id=? AND thread_id=? AND status='pending'
+                LIMIT 1
+                """,
+                (cid, tid),
+            ).fetchone()
+        return bool(row)
+
     def find_pending_duplicate(
         self,
         *,

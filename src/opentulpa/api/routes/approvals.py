@@ -189,4 +189,20 @@ def register_approval_routes(
             return JSONResponse(status_code=404, content={"detail": "approval not found"})
         return {"ok": True, "approval": payload}
 
+    @app.get("/internal/approvals/pending/status")
+    async def internal_approvals_pending_status(request: Request) -> Any:
+        broker = get_approvals()
+        customer_id = str(request.query_params.get("customer_id", "")).strip()
+        thread_id = str(request.query_params.get("thread_id", "")).strip()
+        if not customer_id or not thread_id:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "customer_id and thread_id are required"},
+            )
+        pending = broker.has_pending_for_customer_thread(
+            customer_id=customer_id,
+            thread_id=thread_id,
+        )
+        return {"ok": True, "pending": bool(pending)}
+
     return _decide_approval_and_maybe_wake
