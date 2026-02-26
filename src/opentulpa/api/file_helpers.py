@@ -17,6 +17,7 @@ def sanitize_uploaded_file_record(
     max_excerpt_chars: int = 16000,
 ) -> dict[str, Any]:
     """Return safe uploaded-file metadata for API responses."""
+    local_path = str(record.get("local_path", "")).strip() or None
     clean = {
         "id": record.get("id"),
         "customer_id": record.get("customer_id"),
@@ -29,6 +30,8 @@ def sanitize_uploaded_file_record(
         "caption": record.get("caption"),
         "summary": record.get("summary"),
         "created_at": record.get("created_at"),
+        "vault_path": record.get("stored_path"),
+        "local_path": local_path,
     }
     if include_excerpt:
         excerpt = str(record.get("text_excerpt", "") or "")

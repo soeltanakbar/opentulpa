@@ -86,6 +86,7 @@ async def stream_langgraph_reply_to_telegram(
     chat_id: int,
 ) -> tuple[str | None, bool]:
     stream_message_id: int | None = None
+    progress_message_id: int | None = None
     last_streamed = ""
     final_reply = None
     delivered_any = False
@@ -168,18 +169,17 @@ async def stream_langgraph_reply_to_telegram(
                 if consecutive_timeouts < max_consecutive_timeouts:
                     if not progress_notified:
                         progress_text = "Still working on this — one sec."
-                        stream_message_id = (
+                        progress_message_id = (
                             await client.upsert_stream_message(
                                 chat_id=chat_id,
                                 text=progress_text,
-                                message_id=stream_state.get("message_id"),
+                                message_id=None,
                                 parse_mode="HTML",
                             )
-                            or stream_state.get("message_id")
                         )
+                        stream_message_id = progress_message_id or stream_state.get("message_id")
                         stream_state["message_id"] = stream_message_id
-                        if stream_message_id is not None:
-                            delivered_any = True
+                        if progress_message_id is not None:
                             progress_notified = True
                     # Auto-retry once on transient model/provider stalls before failing user-visible.
                     logger.warning(
@@ -209,6 +209,12 @@ async def stream_langgraph_reply_to_telegram(
                         customer_id,
                         "first_token" if not last_streamed else "idle",
                     )
+                    if progress_message_id is not None:
+                        with suppress(Exception):
+                            await client.delete_message(chat_id=chat_id, message_id=progress_message_id)
+                        progress_message_id = None
+                        stream_message_id = None
+                        stream_state["message_id"] = None
                     stream_message_id = (
                         await client.upsert_stream_message(
                             chat_id=chat_id,
@@ -269,6 +275,12 @@ async def stream_langgraph_reply_to_telegram(
             current = partial.strip()
             if not current or is_low_signal_reply(current) or current == last_streamed:
                 continue
+            if progress_message_id is not None:
+                with suppress(Exception):
+                    await client.delete_message(chat_id=chat_id, message_id=progress_message_id)
+                if stream_state.get("message_id") == progress_message_id:
+                    stream_state["message_id"] = None
+                progress_message_id = None
             # Defensive boundary handling for streams that reset partial text without explicit signal.
             if last_streamed and not current.startswith(last_streamed):
                 waiting_for_segment = True

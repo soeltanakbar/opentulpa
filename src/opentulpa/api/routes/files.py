@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import mimetypes
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -12,6 +13,9 @@ from opentulpa.api.file_helpers import (
     download_image_from_web_url,
     sanitize_uploaded_file_record,
 )
+from opentulpa.tasks.sandbox import TULPA_STUFF_DIR, is_within
+
+MAX_LOCAL_SEND_BYTES = 45_000_000
 
 
 def register_file_routes(
@@ -100,6 +104,68 @@ def register_file_routes(
         if not sent:
             return JSONResponse(status_code=502, content={"detail": "telegram send failed"})
         return {"ok": True, "file_id": file_id, "chat_id": chat_id}
+
+    @app.post("/internal/files/send_local")
+    async def internal_files_send_local(request: Request) -> Any:
+        body = await request.json()
+        customer_id = str(body.get("customer_id", "")).strip()
+        local_path = str(body.get("path", "")).strip()
+        caption_raw = body.get("caption")
+        caption = str(caption_raw).strip() if caption_raw is not None else None
+        caption = caption or None
+        if not telegram_enabled:
+            return JSONResponse(status_code=501, content={"detail": "Telegram not configured"})
+        if not customer_id or not local_path:
+            return JSONResponse(
+                status_code=400, content={"detail": "customer_id and path are required"}
+            )
+        try:
+            target = (TULPA_STUFF_DIR.parent / local_path).resolve()
+        except Exception:
+            return JSONResponse(status_code=400, content={"detail": "invalid path"})
+        if not is_within(target, TULPA_STUFF_DIR):
+            return JSONResponse(status_code=400, content={"detail": "path must be under tulpa_stuff/"})
+        if not target.exists():
+            return JSONResponse(status_code=404, content={"detail": "file not found"})
+        if target.is_dir():
+            return JSONResponse(status_code=400, content={"detail": "path is a directory"})
+        try:
+            file_size = int(target.stat().st_size)
+        except Exception:
+            return JSONResponse(status_code=502, content={"detail": "failed to stat local file"})
+        if file_size > MAX_LOCAL_SEND_BYTES:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "detail": (
+                        f"file too large ({file_size} bytes > {MAX_LOCAL_SEND_BYTES} bytes)"
+                    )
+                },
+            )
+
+        chat_id: Any = None
+        slots = get_telegram_chat().find_session_slots(customer_id)
+        if slots:
+            chat_id = slots[0].get("chat_id")
+        if chat_id is None:
+            return JSONResponse(status_code=404, content={"detail": "no chat found for customer"})
+        try:
+            raw_bytes = target.read_bytes()
+        except Exception:
+            return JSONResponse(status_code=502, content={"detail": "failed to read local file"})
+        guessed_mime, _ = mimetypes.guess_type(str(target.name))
+        sent = await get_telegram_client().send_file(
+            chat_id=chat_id,
+            filename=str(target.name),
+            raw_bytes=raw_bytes,
+            kind="document",
+            mime_type=str(guessed_mime).strip() if guessed_mime else None,
+            caption=caption,
+            parse_mode="HTML",
+        )
+        if not sent:
+            return JSONResponse(status_code=502, content={"detail": "telegram send failed"})
+        return {"ok": True, "path": local_path, "chat_id": chat_id}
 
     @app.post("/internal/files/send_web_image")
     async def internal_files_send_web_image(request: Request) -> Any:

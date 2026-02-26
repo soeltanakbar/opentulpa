@@ -177,6 +177,18 @@ class TelegramClient:
         data = await self._post("sendChatAction", {"chat_id": chat_id, "action": safe_action})
         return bool(data)
 
+    async def delete_message(
+        self,
+        *,
+        chat_id: int | str,
+        message_id: int,
+    ) -> bool:
+        data = await self._post(
+            "deleteMessage",
+            {"chat_id": chat_id, "message_id": int(message_id)},
+        )
+        return bool(data)
+
     async def upsert_stream_message(
         self,
         *,

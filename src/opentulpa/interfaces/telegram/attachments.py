@@ -3,11 +3,40 @@
 from __future__ import annotations
 
 from contextlib import suppress
+from pathlib import Path
+import re
 from typing import Any
 
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.interfaces.telegram.models import TelegramAttachment
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+
+
+def _safe_segment(value: str, *, fallback: str) -> str:
+    clean = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip()).strip("._")
+    return clean[:180] or fallback
+
+
+def _mirror_uploaded_file(
+    *,
+    customer_id: str,
+    file_id: str,
+    filename: str,
+    raw_bytes: bytes,
+) -> str | None:
+    customer_seg = _safe_segment(customer_id, fallback="customer")
+    safe_name = _safe_segment(filename, fallback="file.bin")
+    rel_path = Path("tulpa_stuff") / "uploads" / customer_seg / f"{file_id}_{safe_name}"
+    abs_path = (PROJECT_ROOT / rel_path).resolve()
+    try:
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        abs_path.write_bytes(raw_bytes)
+        return str(rel_path)
+    except Exception:
+        return None
 
 
 def extract_attachments(message: dict[str, Any]) -> list[TelegramAttachment]:
@@ -79,11 +108,15 @@ def build_uploaded_files_context(records: list[dict[str, Any]]) -> str:
         "Uploaded files attached to this message were already ingested and indexed:",
     ]
     for rec in records:
+        local_path = str(rec.get("local_path", "")).strip()
+        vault_path = str(rec.get("stored_path", "")).strip()
         lines.append(
-            "- id={id} name={name} kind={kind} created_at={created_at} summary={summary}".format(
+            "- id={id} name={name} kind={kind} local_path={local_path} vault_path={vault_path} created_at={created_at} summary={summary}".format(
                 id=str(rec.get("id", "")).strip(),
                 name=str(rec.get("original_filename", "")).strip(),
                 kind=str(rec.get("kind", "")).strip(),
+                local_path=local_path or "unknown",
+                vault_path=vault_path or "unknown",
                 created_at=str(rec.get("created_at", "")).strip(),
                 summary=str(rec.get("summary", "")).strip()[:700],
             )
@@ -122,6 +155,14 @@ async def ingest_attachments(
             caption=caption,
             raw_bytes=bytes(raw_bytes),
         )
+        local_path = _mirror_uploaded_file(
+            customer_id=customer_id,
+            file_id=str(record.get("id", "")).strip(),
+            filename=str(record.get("original_filename", "")).strip() or "file.bin",
+            raw_bytes=bytes(raw_bytes),
+        )
+        if local_path:
+            record = {**record, "local_path": local_path}
         if (
             attachment.kind == "voice"
             and agent_runtime is not None
@@ -148,7 +189,8 @@ async def ingest_attachments(
                                 "User sent voice message: "
                                 f"id={record.get('id')} "
                                 f"name={record.get('original_filename')} "
-                                f"path={record.get('stored_path')} "
+                                f"vault_path={record.get('stored_path')} "
+                                f"local_path={record.get('local_path', '')} "
                                 f"transcript={str(record.get('voice_transcript', ''))[:1200]}"
                             ),
                             user_id=customer_id,
@@ -178,7 +220,9 @@ async def ingest_attachments(
                     (
                         "User uploaded file stored in vault: "
                         f"id={record.get('id')} name={record.get('original_filename')} "
-                        f"kind={record.get('kind')} path={record.get('stored_path')} "
+                        f"kind={record.get('kind')} "
+                        f"vault_path={record.get('stored_path')} "
+                        f"local_path={record.get('local_path', '')} "
                         f"summary={record.get('summary', '')[:1200]}"
                     ),
                     user_id=customer_id,

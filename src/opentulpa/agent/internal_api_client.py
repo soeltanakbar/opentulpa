@@ -43,9 +43,12 @@ class InternalApiClient:
                     await asyncio.sleep(0.6 * (2**attempt))
                     continue
                 return response
-            except retryable_errors:
+            except retryable_errors as exc:
                 if attempt < retries:
                     await asyncio.sleep(0.6 * (2**attempt))
                     continue
-                raise
+                exc_name = type(exc).__name__
+                raise RuntimeError(
+                    f"request to {method} {path} failed after {retries + 1} attempts: {exc_name}"
+                ) from exc
         raise RuntimeError("request retry loop exhausted")
