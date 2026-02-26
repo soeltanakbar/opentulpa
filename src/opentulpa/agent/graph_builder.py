@@ -78,6 +78,7 @@ def build_runtime_graph(runtime: Any):
         "uploaded_file_search": ("query",),
         "uploaded_file_get": ("file_id",),
         "uploaded_file_send": ("file_id",),
+        "tulpa_file_send": ("path",),
         "web_image_send": ("url",),
         "uploaded_file_analyze": ("file_id",),
         "skill_get": ("name",),
@@ -146,10 +147,12 @@ def build_runtime_graph(runtime: Any):
             "use uploaded_file_search, then uploaded_file_get/uploaded_file_analyze/uploaded_file_send as needed. "
             "If user asks to send/share a file back in this chat, call uploaded_file_send exactly once "
             "for the selected file and only state it was sent after a successful tool result. "
+            "If you generated a local file under tulpa_stuff/ and user asks to send it in chat, call "
+            "tulpa_file_send exactly once with that path and only state it was sent after a successful result. "
             "Use known link aliases (link_*) for very long URLs to reduce copy errors. "
             "If you output a known alias ID, it will be expanded to full URL for the user. "
             "When users share important links/files/IDs they may need later, proactively call memory_add and store exact URL/file name/file_id/path values. "
-            "Files uploaded by users are persisted in the file vault (with summary/description); use uploaded_file_search/uploaded_file_get to retrieve records and memory_add exact file name/file_id/path when the user may need recall later. "
+            "Files uploaded by users are persisted in the file vault (with summary/description) and mirrored to tulpa_stuff/uploads/<customer>/<file_id>_<name>; use uploaded_file_search/uploaded_file_get to retrieve records (vault_path/local_path) and memory_add exact file name/file_id/path when the user may need recall later. "
             "When you are unsure about prior user-specific facts/preferences/IDs because they are not in short-term context, "
             "call memory_search before asking the user to repeat themselves. "
             "Credential/token recovery policy: before asking users for keys, secrets, tokens, client files, or auth codes, "
@@ -174,6 +177,10 @@ def build_runtime_graph(runtime: Any):
             "When creating or editing code with tulpa_write_file, call tulpa_validate_file on each edited file. "
             "Before claiming code tasks are complete, run tulpa_run_terminal quality checks "
             "(at least ruff + compileall; run pytest when tests exist). "
+            "tulpa_run_terminal working_dir rule: the default working_dir is 'tulpa_stuff', meaning the shell "
+            "is already inside the tulpa_stuff/ directory. Never prefix commands with 'tulpa_stuff/' when "
+            "working_dir='tulpa_stuff' — write 'python3 myscript.py', not 'python3 tulpa_stuff/myscript.py'. "
+            "Only use a 'tulpa_stuff/' prefix in the command if working_dir is set to a different directory. "
             "If the user asks what you can do/capabilities, include concrete integration capabilities: "
             "setting/storing API keys from Telegram setup flows, building new service integrations by writing code, "
             "scheduling periodic polling jobs, and producing change summaries/alerts from API or web data. "
@@ -426,8 +433,9 @@ def build_runtime_graph(runtime: Any):
                             content=(
                                 "ROUTINE_IMPLEMENTATION_COMMAND_REQUIRED: routine_create needs "
                                 "implementation_command (a concrete shell/script command like "
-                                "`python3 tulpa_stuff/scripts/digest.py`) describing what will run "
-                                "on each scheduled execution. Repair the call and retry."
+                                "`python3 scripts/digest.py`) describing what will run "
+                                "on each scheduled execution (the command runs with working_dir=tulpa_stuff "
+                                "by default, so no tulpa_stuff/ prefix needed). Repair the call and retry."
                             ),
                             tool_call_id=call_id,
                         )
@@ -552,6 +560,7 @@ def build_runtime_graph(runtime: Any):
                     "uploaded_file_search",
                     "uploaded_file_get",
                     "uploaded_file_send",
+                    "tulpa_file_send",
                     "web_image_send",
                     "uploaded_file_analyze",
                     "skill_list",

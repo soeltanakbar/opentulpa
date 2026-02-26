@@ -88,7 +88,7 @@ class ApprovalEvaluator:
         origin_conversation_id: str,
         origin_user_id: str,
     ) -> RecipientScope:
-        if action_name in {"uploaded_file_send", "web_image_send", "tulpa_write_file"}:
+        if action_name in {"uploaded_file_send", "tulpa_file_send", "web_image_send", "tulpa_write_file"}:
             return "self"
         if action_name in EXTERNAL_DEFAULT_ACTIONS:
             return "external"
@@ -145,6 +145,8 @@ class ApprovalEvaluator:
     def summarize_action(action_name: str, action_args: dict[str, Any]) -> str:
         if action_name == "uploaded_file_send":
             return f"send file_id={str(action_args.get('file_id', '')).strip()[:60]}"
+        if action_name == "tulpa_file_send":
+            return f"send local file path={str(action_args.get('path', '')).strip()[:120]}"
         if action_name == "web_image_send":
             return f"send image from url={str(action_args.get('url', '')).strip()[:100]}"
         if action_name == "browser_use_run":

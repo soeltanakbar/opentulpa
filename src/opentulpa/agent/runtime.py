@@ -96,6 +96,7 @@ APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS: set[str] = {
     "uploaded_file_search",
     "uploaded_file_get",
     "uploaded_file_send",
+    "tulpa_file_send",
     "web_image_send",
     "uploaded_file_analyze",
     "skill_list",
@@ -1660,6 +1661,9 @@ class OpenTulpaLangGraphRuntime:
         action_note: str | None = None,
     ) -> dict[str, Any]:
         """Call upstream approval broker to evaluate a tool call at action time."""
+        safe_cmd = ""
+        if action_name == "tulpa_run_terminal":
+            safe_cmd = str((action_args or {}).get("command", "")).strip()[:300]
         try:
             response = await self._request_with_backoff(
                 "POST",
@@ -1676,6 +1680,15 @@ class OpenTulpaLangGraphRuntime:
                 retries=1,
             )
             if response.status_code != 200:
+                self.log_behavior_event(
+                    event="guardrail.evaluate.http_error",
+                    thread_id=thread_id,
+                    customer_id=customer_id,
+                    action_name=action_name,
+                    command=safe_cmd,
+                    status_code=response.status_code,
+                    gate="require_approval",
+                )
                 return {
                     "gate": "require_approval",
                     "reason": f"guardrail_http_{response.status_code}",
@@ -1683,16 +1696,46 @@ class OpenTulpaLangGraphRuntime:
                 }
             payload = response.json()
             if isinstance(payload, dict):
+                self.log_behavior_event(
+                    event="guardrail.evaluate.decision",
+                    thread_id=thread_id,
+                    customer_id=customer_id,
+                    action_name=action_name,
+                    command=safe_cmd,
+                    gate=str(payload.get("gate", "")),
+                    reason=str(payload.get("reason", ""))[:200],
+                    impact_type=str(payload.get("impact_type", "")),
+                    recipient_scope=str(payload.get("recipient_scope", "")),
+                    confidence=payload.get("confidence"),
+                )
                 return payload
+            self.log_behavior_event(
+                event="guardrail.evaluate.invalid_payload",
+                thread_id=thread_id,
+                customer_id=customer_id,
+                action_name=action_name,
+                command=safe_cmd,
+                gate="require_approval",
+            )
             return {
                 "gate": "require_approval",
                 "reason": "guardrail_invalid_payload",
                 "summary": f"execute {action_name}",
             }
         except Exception as exc:
+            exc_name = type(exc).__name__
+            self.log_behavior_event(
+                event="guardrail.evaluate.exception",
+                thread_id=thread_id,
+                customer_id=customer_id,
+                action_name=action_name,
+                command=safe_cmd,
+                gate="require_approval",
+                error=f"{exc_name}: {exc}",
+            )
             return {
                 "gate": "require_approval",
-                "reason": f"guardrail_request_error:{exc}",
+                "reason": f"guardrail_request_error:{exc_name}",
                 "summary": f"execute {action_name}",
             }
 

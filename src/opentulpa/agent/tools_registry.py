@@ -429,18 +429,36 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def memory_add(summary: str, customer_id: str) -> Any:
         """Store a user memory summary."""
-        r = await runtime._request_with_backoff(
-            "POST",
-            "/internal/memory/add",
-            json_body={
-                "messages": [{"role": "user", "content": summary}],
-                "user_id": customer_id,
-            },
-            timeout=10.0,
+        retryable_errors = (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.ReadTimeout,
+            httpx.RemoteProtocolError,
+            RuntimeError,
         )
-        if r.status_code != 200:
-            return {"error": f"memory_add failed: {r.text}"}
-        return {"ok": True}
+        for attempt in range(2):
+            try:
+                r = await runtime._request_with_backoff(
+                    "POST",
+                    "/internal/memory/add",
+                    json_body={
+                        "messages": [{"role": "user", "content": summary}],
+                        "user_id": customer_id,
+                    },
+                    timeout=30.0,
+                    retries=0,
+                )
+                if r.status_code != 200:
+                    return {"error": f"memory_add failed ({r.status_code}): {r.text}"}
+                return {"ok": True}
+            except retryable_errors as exc:
+                if attempt == 0:
+                    await asyncio.sleep(1.5)
+                    continue
+                exc_name = type(exc).__name__
+                detail = str(exc) or exc_name
+                return {"error": f"memory_add timed out after retries: {detail}"}
+        return {"error": "memory_add failed: exhausted retries"}
 
     @tool
     async def uploaded_file_search(query: str, customer_id: str, limit: int = 5) -> Any:
@@ -501,6 +519,27 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         )
         if r.status_code != 200:
             return {"error": f"uploaded_file_send failed: {r.text}"}
+        return r.json()
+
+    @tool
+    async def tulpa_file_send(
+        path: str,
+        customer_id: str,
+        caption: str | None = None,
+    ) -> Any:
+        """Send a local file from tulpa_stuff/ back to the user's Telegram chat."""
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/files/send_local",
+            json_body={
+                "path": path,
+                "customer_id": customer_id,
+                "caption": caption,
+            },
+            timeout=25.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"tulpa_file_send failed: {r.text}"}
         return r.json()
 
     @tool
@@ -1553,6 +1592,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         "uploaded_file_search": uploaded_file_search,
         "uploaded_file_get": uploaded_file_get,
         "uploaded_file_send": uploaded_file_send,
+        "tulpa_file_send": tulpa_file_send,
         "web_image_send": web_image_send,
         "uploaded_file_analyze": uploaded_file_analyze,
         "skill_list": skill_list,
