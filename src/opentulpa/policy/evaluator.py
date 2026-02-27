@@ -9,7 +9,6 @@ from opentulpa.agent.result_models import GuardrailIntentDecision
 from opentulpa.approvals.models import ActionIntent, GateAction, GateDecision, RecipientScope
 
 EXTERNAL_DEFAULT_ACTIONS: set[str] = {
-    "slack_post",
     "whatsapp_send",
     "email_send",
 }

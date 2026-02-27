@@ -54,8 +54,8 @@ Describe a workflow and OpenTulpa writes the code, runs it, schedules it, and sa
 top movers, my portfolio delta, any earnings today."
 → Stores the key, writes the integration, registers the recurring job.
 
-"Build me a Slack bot that posts a daily standup prompt to #engineering at 9am."
-→ Writes the full Slack integration from scratch, saves it as a reusable skill.
+"Build me a Telegram bot routine that posts a daily standup prompt at 9am."
+→ Writes the full integration from scratch, saves it as a reusable skill.
 
 "Register me on Moltbook." (with Browser Use connected)
 → Opens a browser, fills the form, completes the flow autonomously.
@@ -63,7 +63,7 @@ top movers, my portfolio delta, any earnings today."
 "Here's my Notion token. Summarize everything updated this week into a digest."
 → Done. Say "schedule that" and it registers the recurring job immediately.
 
-"Write me a GitHub webhook that posts a Slack message on every failed CI run."
+"Write me a GitHub webhook that posts a Telegram alert on every failed CI run."
 → Builds both ends of the integration, inside the chat, from a single message.
 ```
 
@@ -274,7 +274,7 @@ src/opentulpa/
 ├── context/       # Profiles, event backlog, file vault, rollups
 ├── domain/        # Domain contracts (conversation request/response)
 ├── interfaces/    # Telegram transport and streaming relay
-├── integrations/  # External clients (web/slack/etc.)
+├── integrations/  # External clients (web/etc.)
 ├── memory/        # mem0 integration layer
 ├── policy/        # Approval intent/policy evaluation
 ├── scheduler/     # Routine scheduling and persistence

@@ -50,7 +50,7 @@ Prefer behavior-preserving refactors backed by targeted tests and deterministic 
 - Mock external boundaries:
   - OpenRouter/model calls,
   - network fetches (`httpx`),
-  - Telegram/Slack API calls,
+  - Telegram API calls,
   - filesystem side effects when not under test.
 - Assert observable behavior, not private implementation details.
 

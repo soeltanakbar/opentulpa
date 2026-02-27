@@ -77,11 +77,6 @@ class Settings(BaseSettings):
         default=None,
         description="Optional CSV allowlist of Telegram numeric user IDs.",
     )
-
-    # Slack (for Slack skill: list channels, read history, post)
-    slack_bot_token: str | None = Field(
-        default=None, description="Slack Bot OAuth token (xoxb-...)"
-    )
     telegram_webhook_secret: str | None = Field(
         default=None,
         description="Optional secret for webhook path",

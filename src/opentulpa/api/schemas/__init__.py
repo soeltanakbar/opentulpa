@@ -35,12 +35,6 @@ from opentulpa.api.schemas.skills import (
     SkillListRequest,
     SkillUpsertRequest,
 )
-from opentulpa.api.schemas.slack import (
-    SlackChannelHistoryQuery,
-    SlackChannelsQuery,
-    SlackConsentRequest,
-    SlackPostRequest,
-)
 from opentulpa.api.schemas.tasks import TaskCreateRequest, TaskEventsQuery, TaskRelaunchRequest
 from opentulpa.api.schemas.telegram import TelegramWebhookRequest
 from opentulpa.api.schemas.tulpa import (
@@ -76,10 +70,6 @@ __all__ = [
     "SkillGetRequest",
     "SkillListRequest",
     "SkillUpsertRequest",
-    "SlackChannelHistoryQuery",
-    "SlackChannelsQuery",
-    "SlackConsentRequest",
-    "SlackPostRequest",
     "TaskCreateRequest",
     "TaskEventsQuery",
     "TaskRelaunchRequest",
