@@ -27,11 +27,9 @@ from opentulpa.api.routes import (
     register_wake_and_search_routes,
 )
 from opentulpa.api.tulpa_loader import TulpaRouterLoader
-from opentulpa.application import (
-    ApprovalExecutionOrchestrator,
-    TurnOrchestrator,
-    WakeOrchestrator,
-)
+from opentulpa.application.approval_execution import ApprovalExecutionOrchestrator
+from opentulpa.application.turn_orchestrator import TurnOrchestrator
+from opentulpa.application.wake_orchestrator import WakeOrchestrator
 from opentulpa.approvals.adapters.telegram import TelegramApprovalAdapter
 from opentulpa.approvals.broker import ApprovalBroker
 from opentulpa.approvals.store import PendingApprovalStore

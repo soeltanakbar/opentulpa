@@ -8,6 +8,15 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from opentulpa.api.errors import parse_query_model, parse_request_model
+from opentulpa.api.schemas.slack import (
+    SlackChannelHistoryQuery,
+    SlackChannelsQuery,
+    SlackConsentRequest,
+    SlackPostRequest,
+)
+from opentulpa.application.slack_orchestrator import SlackOrchestrator, SlackOrchestratorResult
+
 
 def register_slack_routes(
     app: FastAPI,
@@ -17,60 +26,55 @@ def register_slack_routes(
     grant_write_consent: Callable[[str], None],
 ) -> None:
     """Register internal Slack endpoints used by tools."""
+    orchestrator = SlackOrchestrator(
+        get_slack=get_slack,
+        has_write_consent=has_write_consent,
+        grant_write_consent=grant_write_consent,
+    )
+
+    def _to_http_response(result: SlackOrchestratorResult) -> Any:
+        if result.status_code != 200:
+            return JSONResponse(status_code=result.status_code, content=result.payload)
+        return result.payload
 
     @app.get("/internal/slack/channels")
-    async def internal_slack_channels(limit: int = 100, cursor: str = "") -> Any:
-        result = await get_slack().list_channels(limit=limit, cursor=cursor or None)
-        return result
+    async def internal_slack_channels(request: Request) -> Any:
+        parsed, error = parse_query_model(request, SlackChannelsQuery)
+        if error is not None or parsed is None:
+            return error
+        result = await orchestrator.list_channels(limit=parsed.limit, cursor=parsed.cursor)
+        return _to_http_response(result)
 
     @app.get("/internal/slack/channels/{channel_id}/history")
-    async def internal_slack_history(channel_id: str, limit: int = 20, cursor: str = "") -> Any:
-        result = await get_slack().channel_history(channel_id, limit=limit, cursor=cursor or None)
-        return result
+    async def internal_slack_history(channel_id: str, request: Request) -> Any:
+        parsed, error = parse_query_model(request, SlackChannelHistoryQuery)
+        if error is not None or parsed is None:
+            return error
+        result = await orchestrator.channel_history(
+            channel_id=channel_id,
+            limit=parsed.limit,
+            cursor=parsed.cursor,
+        )
+        return _to_http_response(result)
 
     @app.post("/internal/slack/consent")
     async def internal_slack_consent(request: Request) -> Any:
         """Grant Slack write consent for this customer (called when user confirms in chat)."""
-        body = await request.json()
-        customer_id = body.get("customer_id")
-        scope = body.get("scope", "write")
-        if not customer_id:
-            return JSONResponse(status_code=400, content={"detail": "customer_id required"})
-        if scope != "write":
-            return JSONResponse(status_code=400, content={"detail": "scope must be 'write'"})
-        grant_write_consent(customer_id)
-        return {"ok": True, "message": "Slack write consent granted."}
+        parsed, error = await parse_request_model(request, SlackConsentRequest)
+        if error is not None or parsed is None:
+            return error
+        result = orchestrator.grant_consent(customer_id=parsed.customer_id, scope=parsed.scope)
+        return _to_http_response(result)
 
     @app.post("/internal/slack/post")
     async def internal_slack_post(request: Request) -> Any:
-        body = await request.json()
-        customer_id = body.get("customer_id")
-        channel_id = body.get("channel_id", "")
-        text = body.get("text", "")
-        thread_ts = body.get("thread_ts")
-        if not customer_id:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "ok": False,
-                    "error": "customer_id required",
-                    "detail": "customer_id required",
-                },
-            )
-        if not channel_id or not text:
-            return JSONResponse(status_code=400, content={"detail": "channel_id and text required"})
-        if not has_write_consent(customer_id):
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "ok": False,
-                    "error": "consent_required",
-                    "message": (
-                        "The user has not granted permission to post to Slack. "
-                        "Ask the user to confirm they allow the agent to post to Slack on their behalf; "
-                        "once they agree, use slack_grant_write_consent and then try posting again."
-                    ),
-                },
-            )
-        result = await get_slack().post_message(channel_id, text, thread_ts=thread_ts)
-        return result
+        parsed, error = await parse_request_model(request, SlackPostRequest)
+        if error is not None or parsed is None:
+            return error
+        result = await orchestrator.post_message(
+            customer_id=parsed.customer_id,
+            channel_id=parsed.channel_id,
+            text=parsed.text,
+            thread_ts=parsed.thread_ts,
+        )
+        return _to_http_response(result)

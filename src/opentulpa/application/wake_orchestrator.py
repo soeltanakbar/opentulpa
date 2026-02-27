@@ -6,6 +6,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
 
+from opentulpa.agent.result_models import WakeEventDecision
 from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
 
 
@@ -29,7 +30,14 @@ class WakeOrchestrator:
         self._get_agent_runtime = get_agent_runtime
         self._get_approvals = get_approvals
 
-    def _backlog(self, *, customer_id: str, source: str, event_type: str, payload: dict[str, Any]) -> None:
+    def _backlog(
+        self,
+        *,
+        customer_id: str,
+        source: str,
+        event_type: str,
+        payload: dict[str, object],
+    ) -> None:
         self._get_context_events().add_event(
             customer_id=customer_id,
             source=source,
@@ -46,7 +54,7 @@ class WakeOrchestrator:
                 origin_conversation_id=str(chat_id),
             )
 
-    async def handle_event(self, body: dict[str, Any]) -> None:
+    async def handle_event(self, body: dict[str, object]) -> None:
         wake_type = str(body.get("type", "")).strip()
         if wake_type not in {"task_event", "routine_event", "approval_event"}:
             return
@@ -59,7 +67,7 @@ class WakeOrchestrator:
             return
         await self._handle_routine_event(body)
 
-    async def _handle_approval_event(self, body: dict[str, Any]) -> None:
+    async def _handle_approval_event(self, body: dict[str, object]) -> None:
         customer_id = str(body.get("customer_id", "")).strip()
         payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
         event_type = str(body.get("event_type", payload.get("event_type", "approved"))).strip()
@@ -113,7 +121,7 @@ class WakeOrchestrator:
                 self._get_telegram_chat().touch_assistant_message(int(item["chat_id"]))
             await self._flush_deferred_challenges(chat_id=item["chat_id"])
 
-    async def _handle_task_event(self, body: dict[str, Any]) -> None:
+    async def _handle_task_event(self, body: dict[str, object]) -> None:
         customer_id = str(body.get("customer_id", "")).strip()
         event_type = str(body.get("event_type", "")).strip()
         payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
@@ -123,15 +131,17 @@ class WakeOrchestrator:
         runtime = self._get_agent_runtime()
         should_notify = event_type == "needs_input"
         if not should_notify and runtime and hasattr(runtime, "classify_wake_event"):
-            decision = await runtime.classify_wake_event(
-                customer_id=customer_id,
-                event_label=f"task/{event_type}",
-                payload={
-                    "task_id": str(body.get("task_id", "")),
-                    "payload": payload,
-                },
+            decision = WakeEventDecision.from_any(
+                await runtime.classify_wake_event(
+                    customer_id=customer_id,
+                    event_label=f"task/{event_type}",
+                    payload={
+                        "task_id": str(body.get("task_id", "")),
+                        "payload": payload,
+                    },
+                )
             )
-            should_notify = bool(decision.get("notify_user", False))
+            should_notify = bool(decision.notify_user)
 
         backlog_payload = {"task_id": str(body.get("task_id", "")), **payload}
         if not should_notify:
@@ -182,7 +192,7 @@ class WakeOrchestrator:
             )
             await self._flush_deferred_challenges(chat_id=item["chat_id"])
 
-    async def _handle_routine_event(self, body: dict[str, Any]) -> None:
+    async def _handle_routine_event(self, body: dict[str, object]) -> None:
         payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
         customer_id = str(body.get("customer_id") or payload.get("customer_id") or "").strip()
         if not customer_id:

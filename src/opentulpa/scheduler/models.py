@@ -17,13 +17,3 @@ class Routine:
     enabled: bool = True
     created_at: datetime = field(default_factory=datetime.utcnow)
     is_cron: bool = True  # False = one-off at schedule time
-
-
-@dataclass
-class TaskRun:
-    """Record of a task execution."""
-
-    routine_id: str
-    run_at: datetime
-    success: bool
-    result: str | None = None

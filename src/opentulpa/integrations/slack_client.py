@@ -30,11 +30,6 @@ def has_slack_write_consent(customer_id: str) -> bool:
     return str(customer_id) in _slack_write_consent
 
 
-def revoke_slack_write_consent(customer_id: str) -> None:
-    """Revoke Slack write consent for this user."""
-    _slack_write_consent.discard(str(customer_id))
-
-
 class SlackClient:
     """Async Slack client for listing channels, reading history, and posting."""
 
