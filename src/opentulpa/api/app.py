@@ -230,8 +230,11 @@ def create_app(
         logger.info("Processing wake event: %s", body)
         await wake_orchestrator.handle_event(body)
 
+    wake_db = Path(settings.wake_events_db_path)
+    if not wake_db.is_absolute():
+        wake_db = (PROJECT_ROOT / wake_db).resolve()
     wake_queue_service = WakeQueueService(
-        db_path=PROJECT_ROOT / ".opentulpa" / "wake_events.db",
+        db_path=wake_db,
         handler=process_wake_event,
     )
 

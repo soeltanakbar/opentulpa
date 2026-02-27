@@ -269,6 +269,7 @@ def live_llm_harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Harnes
     monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "live-llm-secret")
     monkeypatch.setenv("APPROVALS_DB_PATH", str(tmp_path / "live_llm_approvals.db"))
     monkeypatch.setenv("LINK_ALIAS_DB_PATH", str(tmp_path / "live_llm_links.db"))
+    monkeypatch.setenv("WAKE_EVENTS_DB_PATH", str(tmp_path / "live_llm_wake_events.db"))
     monkeypatch.setattr(app_module, "TelegramClient", lambda _token: fake_telegram)
     get_settings.cache_clear()
     settings = get_settings()

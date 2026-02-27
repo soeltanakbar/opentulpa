@@ -21,6 +21,64 @@ def _clean_thread_id(value: Any) -> str:
     return text
 
 
+def _event_wake_scope(event_label: str, payload: dict[str, Any]) -> str:
+    safe_label = str(event_label or "").strip().lower()
+    nested_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+
+    if safe_label.startswith("routine/"):
+        routine_id = str(payload.get("routine_id") or nested_payload.get("routine_id") or "").strip()
+        if routine_id:
+            return f"routine:{routine_id}"
+        return ""
+
+    if safe_label.startswith("approval/"):
+        approval_id = str(payload.get("approval_id") or nested_payload.get("approval_id") or "").strip()
+        if approval_id:
+            return f"approval:{approval_id}"
+        return "approval"
+
+    if safe_label.startswith("task/"):
+        task_id = str(payload.get("task_id") or nested_payload.get("task_id") or "").strip()
+        if task_id:
+            return f"task:{task_id}"
+        return "task"
+
+    if safe_label:
+        return safe_label.replace("/", ":")
+    return ""
+
+
+def _resolve_slot_wake_thread_id(*, raw_slot: dict[str, Any], scope: str) -> str:
+    if not scope:
+        return _clean_thread_id(raw_slot.get("wake_thread_id"))
+
+    slot_threads = raw_slot.get("wake_thread_ids")
+    if not isinstance(slot_threads, dict):
+        slot_threads = {}
+    scoped_id = _clean_thread_id(slot_threads.get(scope))
+    return scoped_id
+
+
+def _store_slot_wake_thread_id(
+    *,
+    raw_slot: dict[str, Any],
+    scope: str,
+    wake_thread_id: str,
+) -> None:
+    if not scope:
+        raw_slot["wake_thread_id"] = wake_thread_id
+        return
+
+    slot_threads = raw_slot.get("wake_thread_ids")
+    if not isinstance(slot_threads, dict):
+        slot_threads = {}
+    slot_threads[scope] = wake_thread_id
+    raw_slot["wake_thread_ids"] = slot_threads
+
+    if scope.startswith("routine:"):
+        raw_slot["wake_thread_id"] = wake_thread_id
+
+
 async def relay_task_event_via_main_agent(
     *,
     customer_id: str,
@@ -64,6 +122,7 @@ async def relay_event_via_main_agent(
     routine_message = str(routine_payload.get("message", "")).strip()
     routine_name = str(payload.get("routine_name", "")).strip()
     proactive_heartbeat = bool(routine_payload.get("proactive_heartbeat", False))
+    wake_scope = _event_wake_scope(event_label, payload)
     now_utc = datetime.now(timezone.utc)
     replies: list[dict[str, Any]] = []
     for slot in slots:
@@ -112,22 +171,41 @@ async def relay_event_via_main_agent(
             if not decision.notify_user:
                 continue
 
+        allow_no_notify_token = bool(str(event_label).startswith("routine/") and proactive_heartbeat)
+
         if str(event_label).startswith("routine/"):
-            instruction = (
-                "System update: a scheduled routine woke you.\n"
-                "Decide if the user should be messaged right now.\n"
-                f"- event: {event_label}\n"
-                f"- routine_name: {routine_name or 'unnamed'}\n"
-                f"- routine_instruction: {routine_message[:3000] or '(none)'}\n"
-                f"- last_user_message_at_utc: {last_user_at or 'unknown'}\n"
-                f"- user_idle_hours: {user_idle_hours}\n"
-                f"- last_assistant_message_at_utc: {last_assistant_at or 'unknown'}\n"
-                f"- assistant_idle_hours: {assistant_idle_hours}\n"
-                f"- now_utc: {now_utc.isoformat()}\n"
-                f"- payload: {json.dumps(payload, ensure_ascii=False)[:4000]}\n\n"
-                f"If you decide to skip messaging this run, reply exactly: {no_notify_token}\n"
-                "If you decide to message, send one concise, natural message (no rigid status template)."
-            )
+            if allow_no_notify_token:
+                instruction = (
+                    "System update: a scheduled routine woke you.\n"
+                    "Decide if the user should be messaged right now.\n"
+                    f"- event: {event_label}\n"
+                    f"- routine_name: {routine_name or 'unnamed'}\n"
+                    f"- routine_instruction: {routine_message[:3000] or '(none)'}\n"
+                    f"- last_user_message_at_utc: {last_user_at or 'unknown'}\n"
+                    f"- user_idle_hours: {user_idle_hours}\n"
+                    f"- last_assistant_message_at_utc: {last_assistant_at or 'unknown'}\n"
+                    f"- assistant_idle_hours: {assistant_idle_hours}\n"
+                    f"- now_utc: {now_utc.isoformat()}\n"
+                    f"- payload: {json.dumps(payload, ensure_ascii=False)[:4000]}\n\n"
+                    f"If you decide to skip messaging this run, reply exactly: {no_notify_token}\n"
+                    "If you decide to message, send one concise, natural message (no rigid status template)."
+                )
+            else:
+                instruction = (
+                    "System update: a scheduled routine woke you.\n"
+                    "Execute the routine instruction first, then send a concise status message.\n"
+                    "Use available tools as needed, and do not ask the user for approval during this run.\n"
+                    f"- event: {event_label}\n"
+                    f"- routine_name: {routine_name or 'unnamed'}\n"
+                    f"- routine_instruction: {routine_message[:3000] or '(none)'}\n"
+                    f"- last_user_message_at_utc: {last_user_at or 'unknown'}\n"
+                    f"- user_idle_hours: {user_idle_hours}\n"
+                    f"- last_assistant_message_at_utc: {last_assistant_at or 'unknown'}\n"
+                    f"- assistant_idle_hours: {assistant_idle_hours}\n"
+                    f"- now_utc: {now_utc.isoformat()}\n"
+                    f"- payload: {json.dumps(payload, ensure_ascii=False)[:4000]}\n\n"
+                    "After execution, send one concise, natural update."
+                )
         else:
             instruction = (
                 "System update: a background event occurred.\n"
@@ -143,15 +221,20 @@ async def relay_event_via_main_agent(
             raw_slot = sessions.get(_chat_key)
             if not isinstance(raw_slot, dict):
                 raw_slot = {}
-            wake_thread_id = _clean_thread_id(raw_slot.get("wake_thread_id"))
+            wake_thread_id = _resolve_slot_wake_thread_id(raw_slot=raw_slot, scope=wake_scope)
             if not wake_thread_id or not wake_thread_id.lower().startswith("wake_"):
                 wake_thread_id = new_short_id("wake")
-                raw_slot["wake_thread_id"] = wake_thread_id
+                _store_slot_wake_thread_id(
+                    raw_slot=raw_slot,
+                    scope=wake_scope,
+                    wake_thread_id=wake_thread_id,
+                )
                 sessions[_chat_key] = raw_slot
                 state["sessions"] = sessions
             return wake_thread_id
 
         wake_thread_id = state_store.update(_ensure_wake_thread_id)
+
         try:
             text = await agent_runtime.ainvoke_text(
                 thread_id=wake_thread_id,
@@ -163,8 +246,10 @@ async def relay_event_via_main_agent(
             safe = str(text or "").strip()
             if not safe:
                 continue
-            if safe == no_notify_token:
+            if safe == no_notify_token and allow_no_notify_token:
                 replies.append({"chat_id": chat_id, "text": no_notify_token})
+                continue
+            if safe == no_notify_token:
                 continue
             replies.append({"chat_id": chat_id, "text": safe})
         except Exception:
