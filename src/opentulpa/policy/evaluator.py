@@ -5,10 +5,10 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
+from opentulpa.agent.result_models import GuardrailIntentDecision
 from opentulpa.approvals.models import ActionIntent, GateAction, GateDecision, RecipientScope
 
 EXTERNAL_DEFAULT_ACTIONS: set[str] = {
-    "slack_post",
     "whatsapp_send",
     "email_send",
 }
@@ -124,9 +124,9 @@ class ApprovalEvaluator:
         action_name: str,
         action_args: dict[str, Any],
         action_note: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> GuardrailIntentDecision:
         if self._runtime is None or not hasattr(self._runtime, "classify_guardrail_intent"):
-            return {"ok": False, "error": "runtime_unavailable"}
+            return GuardrailIntentDecision(ok=False, error="runtime_unavailable")
         try:
             result = await self._runtime.classify_guardrail_intent(
                 action_name=action_name,
@@ -134,12 +134,11 @@ class ApprovalEvaluator:
                 action_note=str(action_note or "").strip()[:2000],
             )
         except Exception as exc:
-            return {"ok": False, "error": f"classifier_error:{exc}"}
-        if not isinstance(result, dict):
-            return {"ok": False, "error": "classifier_invalid_payload"}
-        if not bool(result.get("ok", True)):
-            return {"ok": False, "error": str(result.get("error", "classifier_not_ok"))}
-        return {"ok": True, **result}
+            return GuardrailIntentDecision(ok=False, error=f"classifier_error:{exc}")
+        hint = GuardrailIntentDecision.from_any(result)
+        if not hint.ok and not str(hint.error or "").strip():
+            return hint.model_copy(update={"error": "classifier_not_ok"})
+        return hint
 
     @staticmethod
     def summarize_action(action_name: str, action_args: dict[str, Any]) -> str:
@@ -207,21 +206,21 @@ class ApprovalEvaluator:
             action_args=action_args,
             action_note=safe_note,
         )
-        if hint.get("ok"):
-            gate = _parse_gate(hint.get("gate"), default=gate)
-            impact = _parse_impact(hint.get("impact_type"), default=impact)
-            llm_scope = _parse_scope(hint.get("recipient_scope"), default=recipient_scope)
+        if hint.ok:
+            gate = _parse_gate(hint.gate, default=gate)
+            impact = _parse_impact(hint.impact_type, default=impact)
+            llm_scope = _parse_scope(hint.recipient_scope, default=recipient_scope)
             if llm_scope != "unknown" or recipient_scope == "unknown":
                 recipient_scope = llm_scope
-            reason = _first_non_empty(hint.get("reason"), reason)[:500]
-            with_conf = hint.get("confidence", confidence)
+            reason = _first_non_empty(hint.reason, reason)[:500]
+            with_conf = hint.confidence
             try:
                 confidence = float(with_conf)
             except Exception:
                 confidence = 0.6
             confidence = max(0.0, min(confidence, 1.0))
         else:
-            reason = str(hint.get("error", "guardrail_classifier_failed"))[:500]
+            reason = str(hint.error or "guardrail_classifier_failed")[:500]
             llm_uncertain = True
             confidence = 0.0
 

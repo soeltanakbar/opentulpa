@@ -45,7 +45,7 @@ class ApprovalExecutionOrchestrator:
         self,
         *,
         approval_id: str,
-        decision_payload: dict[str, Any],
+        decision_payload: dict[str, object],
         chat_id: int,
     ) -> str:
         customer_id = str(decision_payload.get("customer_id", "")).strip()
@@ -174,7 +174,7 @@ class ApprovalExecutionOrchestrator:
         self,
         *,
         approval_ids: list[str],
-        decision_payload: dict[str, Any],
+        decision_payload: dict[str, object],
         chat_id: int,
     ) -> str:
         safe_ids = [str(item).strip() for item in approval_ids if str(item).strip()]

@@ -43,6 +43,7 @@ ALLOWED_TERMINAL_DIRS = {
 ALLOWED_TERMINAL_COMMANDS = {
     "wget",
     "curl",
+    "ssh",
     "python",
     "python3",
     "uv",

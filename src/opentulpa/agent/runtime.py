@@ -10,20 +10,14 @@ This replaces the Parlant subprocess/session model with a local StateGraph that:
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-import re
 import threading
 from collections.abc import AsyncIterator
-from contextlib import suppress
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import httpx
 from langchain.chat_models import init_chat_model
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from opentulpa.agent.context_compaction import (
     compress_rollup as _compress_rollup,
@@ -55,16 +49,117 @@ from opentulpa.agent.file_analysis import (
 from opentulpa.agent.file_analysis import (
     transcribe_audio_blob as _transcribe_audio_blob,
 )
-from opentulpa.agent.graph_builder import build_runtime_graph
 from opentulpa.agent.internal_api_client import InternalApiClient
-from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from opentulpa.agent.result_models import (
+    CompletionClaimVerification,
+    GuardrailIntentDecision,
+    ToolGuardrailDecision,
+    WakeEventDecision,
+)
+from opentulpa.agent.runtime_behavior import (
+    log_behavior_event as _log_behavior_event,
+)
+from opentulpa.agent.runtime_classification import (
+    classify_guardrail_intent as _classify_guardrail_intent_facade,
+)
+from opentulpa.agent.runtime_classification import (
+    classify_wake_event as _classify_wake_event_facade,
+)
+from opentulpa.agent.runtime_classification import (
+    evaluate_tool_guardrail as _evaluate_tool_guardrail_facade,
+)
+from opentulpa.agent.runtime_classification import (
+    verify_completion_claim as _verify_completion_claim_facade,
+)
+from opentulpa.agent.runtime_context_links import (
+    build_link_alias_context as _build_link_alias_context,
+)
+from opentulpa.agent.runtime_context_links import (
+    expand_link_aliases as _expand_link_aliases,
+)
+from opentulpa.agent.runtime_context_links import (
+    prepend_pending_context as _prepend_pending_context,
+)
+from opentulpa.agent.runtime_context_links import (
+    register_links_from_text as _register_links_from_text,
+)
+from opentulpa.agent.runtime_facade import (
+    execute_tool as _execute_tool_facade,
+)
+from opentulpa.agent.runtime_facade import (
+    request_with_backoff as _request_with_backoff_facade,
+)
+from opentulpa.agent.runtime_guardrails import (
+    has_pending_approval_lock as _has_pending_approval_lock,
+)
+from opentulpa.agent.runtime_helpers import (
+    extract_approval_handoff_payload as _extract_approval_handoff_payload,
+)
+from opentulpa.agent.runtime_helpers import (
+    extract_json_object as _extract_json_object,
+)
+from opentulpa.agent.runtime_helpers import (
+    format_approval_handoff_reply as _format_approval_handoff_reply,
+)
+from opentulpa.agent.runtime_helpers import (
+    format_pending_context as _format_pending_context,
+)
+from opentulpa.agent.runtime_helpers import (
+    has_incomplete_internal_json_prefix as _has_incomplete_internal_json_prefix,
+)
+from opentulpa.agent.runtime_helpers import (
+    resolve_link_aliases_in_args as _resolve_link_aliases_in_args,
+)
+from opentulpa.agent.runtime_helpers import (
+    strip_internal_json_prefix as _strip_internal_json_prefix,
+)
 from opentulpa.agent.runtime_input import (
-    MergedInputSuppressedError,
     ThreadInputCoordinator,
 )
-from opentulpa.agent.tools_registry import register_runtime_tools
-from opentulpa.agent.utils import (
-    content_to_text as _content_to_text,
+from opentulpa.agent.runtime_lifecycle import (
+    runtime_healthy as _runtime_healthy,
+)
+from opentulpa.agent.runtime_lifecycle import (
+    shutdown_runtime as _shutdown_runtime,
+)
+from opentulpa.agent.runtime_lifecycle import (
+    start_runtime as _start_runtime,
+)
+from opentulpa.agent.runtime_profile_skills import (
+    list_available_skills as _list_available_skills,
+)
+from opentulpa.agent.runtime_profile_skills import (
+    load_active_directive as _load_active_directive,
+)
+from opentulpa.agent.runtime_profile_skills import (
+    load_user_utc_offset as _load_user_utc_offset,
+)
+from opentulpa.agent.runtime_profile_skills import (
+    pre_resolve_skill_state as _pre_resolve_skill_state,
+)
+from opentulpa.agent.runtime_profile_skills import (
+    resolve_skill_context as _resolve_skill_context,
+)
+from opentulpa.agent.runtime_profile_skills import (
+    select_relevant_skills as _select_relevant_skills,
+)
+from opentulpa.agent.runtime_time_rollups import (
+    build_live_time_context as _build_live_time_context,
+)
+from opentulpa.agent.runtime_time_rollups import (
+    cap_rollup_text as _cap_rollup_text,
+)
+from opentulpa.agent.runtime_time_rollups import (
+    load_thread_rollup as _load_thread_rollup,
+)
+from opentulpa.agent.runtime_time_rollups import (
+    save_thread_rollup as _save_thread_rollup,
+)
+from opentulpa.agent.runtime_turns import (
+    ainvoke_text as _ainvoke_text,
+)
+from opentulpa.agent.runtime_turns import (
+    astream_text as _astream_text,
 )
 from opentulpa.agent.utils import (
     minutes_to_utc_offset as _minutes_to_utc_offset,
@@ -79,10 +174,8 @@ from opentulpa.context.customer_profiles import CustomerProfileService
 from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.context.thread_rollups import ThreadRollupService
-from opentulpa.core.ids import new_short_id
 
 logger = logging.getLogger(__name__)
-_LINK_ID_TOKEN_RE = re.compile(r"\blink_[A-Za-z0-9]{4,12}\b")
 STREAM_WAIT_SIGNAL = "__TULPA_STREAM_WAIT__"
 STREAM_APPROVAL_HANDOFF_SIGNAL = "__TULPA_APPROVAL_HANDOFF__"
 STREAM_EMPTY_REPLY_FALLBACK = (
@@ -242,137 +335,29 @@ class OpenTulpaLangGraphRuntime:
         self._internal_api = InternalApiClient(base_url=self.app_url)
 
     def log_behavior_event(self, *, event: str, **fields: Any) -> None:
-        if not bool(getattr(self, "_behavior_log_enabled", False)):
-            return
-        event_name = str(event or "").strip()
-        if not event_name:
-            return
-        payload: dict[str, Any] = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "event": event_name,
-        }
-        for key, value in fields.items():
-            safe_key = str(key or "").strip()
-            if not safe_key:
-                continue
-            payload[safe_key] = value
-        serialized = json.dumps(payload, ensure_ascii=False, default=str)
-        lock = getattr(self, "_behavior_log_lock", None)
-        path = getattr(self, "_behavior_log_path", None)
-        if not isinstance(path, Path):
-            return
-        with suppress(Exception):
-            path.parent.mkdir(parents=True, exist_ok=True)
-        if lock is None:
-            with suppress(Exception), path.open("a", encoding="utf-8") as f:
-                f.write(serialized + "\n")
-            return
-        with suppress(Exception), lock, path.open("a", encoding="utf-8") as f:
-            f.write(serialized + "\n")
+        _log_behavior_event(
+            behavior_log_enabled=bool(getattr(self, "_behavior_log_enabled", False)),
+            event=event,
+            fields=fields,
+            behavior_log_path=getattr(self, "_behavior_log_path", None),
+            behavior_log_lock=getattr(self, "_behavior_log_lock", None),
+        )
 
     @staticmethod
     def _extract_json_object(text: str) -> dict[str, Any] | None:
-        raw = str(text or "").strip()
-        if not raw:
-            return None
-        try:
-            parsed = json.loads(raw)
-            return parsed if isinstance(parsed, dict) else None
-        except Exception:
-            pass
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start == -1 or end <= start:
-            return None
-        try:
-            parsed = json.loads(raw[start : end + 1])
-            return parsed if isinstance(parsed, dict) else None
-        except Exception:
-            return None
+        return _extract_json_object(text)
 
     @staticmethod
     def _strip_internal_json_prefix(text: str) -> str:
-        """
-        Remove internal control JSON prefixes that can leak into streamed user output.
-
-        Example internal payloads:
-        - {"selected": []} from skill selector
-        - {"notify_user": false, "reason": "..."} from wake classifier
-        """
-        raw = str(text or "")
-        working = raw.lstrip()
-        changed = False
-        decoder = json.JSONDecoder()
-
-        while working.startswith("{"):
-            try:
-                parsed, end_idx = decoder.raw_decode(working)
-            except Exception:
-                break
-
-            is_internal_selector = (
-                isinstance(parsed, dict)
-                and set(parsed.keys()) == {"selected"}
-                and isinstance(parsed.get("selected"), list)
-            )
-            is_internal_classifier = (
-                isinstance(parsed, dict)
-                and "notify_user" in parsed
-                and set(parsed.keys()).issubset({"notify_user", "reason"})
-            )
-            if not (is_internal_selector or is_internal_classifier):
-                break
-
-            working = working[end_idx:].lstrip()
-            changed = True
-
-        return working if changed else raw
+        return _strip_internal_json_prefix(text)
 
     @staticmethod
     def _has_incomplete_internal_json_prefix(text: str) -> bool:
-        """
-        Detect incomplete internal control JSON prefixes during streaming.
-        This prevents leaking partial internal payloads (e.g. '{"selected": ...') to users.
-        """
-        working = str(text or "").lstrip()
-        if not working.startswith("{"):
-            return False
-        head = working[:400]
-        if '"selected"' not in head and '"notify_user"' not in head:
-            return False
-        decoder = json.JSONDecoder()
-        try:
-            parsed, _ = decoder.raw_decode(working)
-        except Exception:
-            return True
-        is_internal_selector = (
-            isinstance(parsed, dict)
-            and set(parsed.keys()) == {"selected"}
-            and isinstance(parsed.get("selected"), list)
-        )
-        is_internal_classifier = (
-            isinstance(parsed, dict)
-            and "notify_user" in parsed
-            and set(parsed.keys()).issubset({"notify_user", "reason"})
-        )
-        return bool(is_internal_selector or is_internal_classifier)
+        return _has_incomplete_internal_json_prefix(text)
 
     @staticmethod
     def _format_pending_context(events: list[dict[str, Any]], *, payload_limit: int = 800) -> str:
-        lines: list[str] = []
-        for idx, event in enumerate(events, start=1):
-            source = str(event.get("source", "event"))
-            event_type = str(event.get("event_type", "update"))
-            payload = event.get("payload", {})
-            if isinstance(payload, dict):
-                payload_text = json.dumps(payload, ensure_ascii=False)
-            else:
-                payload_text = str(payload)
-            payload_text = " ".join(payload_text.split())
-            if len(payload_text) > payload_limit:
-                payload_text = payload_text[:payload_limit] + "..."
-            lines.append(f"{idx}. [{source}/{event_type}] {payload_text}")
-        return "\n".join(lines)
+        return _format_pending_context(events, payload_limit=payload_limit)
 
     def _prepend_pending_context(
         self,
@@ -381,40 +366,28 @@ class OpenTulpaLangGraphRuntime:
         text: str,
         include_pending_context: bool,
     ) -> tuple[str, int | None]:
-        if not include_pending_context or self._context_events is None:
-            return text, None
-        pending = self._context_events.list_events(customer_id, limit=20)
-        if not pending:
-            return text, None
-        through_id = int(pending[-1]["id"])
-        wrapped = (
-            "System context updates collected while the user was away:\n"
-            f"{self._format_pending_context(pending)}\n\n"
-            f"User message:\n{text}"
+        return _prepend_pending_context(
+            context_events=self._context_events,
+            customer_id=customer_id,
+            text=text,
+            include_pending_context=include_pending_context,
+            format_pending_context=lambda events: self._format_pending_context(events),
         )
-        return wrapped, through_id
 
     async def _has_pending_approval_lock(self, *, customer_id: str, thread_id: str) -> bool:
-        cid = str(customer_id or "").strip()
-        tid = str(thread_id or "").strip()
-        if not cid or not tid:
-            return False
-        try:
-            response = await self._request_with_backoff(
-                "GET",
-                "/internal/approvals/pending/status",
-                params={"customer_id": cid, "thread_id": tid},
-                timeout=5.0,
-                retries=0,
-            )
-        except Exception:
-            return False
-        if response.status_code != 200:
-            return False
-        with suppress(Exception):
-            payload = response.json()
-            return bool(payload.get("pending", False))
-        return False
+        return await _has_pending_approval_lock(
+            customer_id=customer_id,
+            thread_id=thread_id,
+            request_with_backoff=self._request_with_backoff,
+        )
+
+    @staticmethod
+    def _extract_approval_handoff_payload(messages: list[Any]) -> dict[str, Any]:
+        return _extract_approval_handoff_payload(messages)
+
+    @staticmethod
+    def _format_approval_handoff_reply(payload: dict[str, Any]) -> str:
+        return _format_approval_handoff_reply(payload)
 
     def register_links_from_text(
         self,
@@ -424,187 +397,56 @@ class OpenTulpaLangGraphRuntime:
         source: str,
         limit: int = 40,
     ) -> list[dict[str, Any]]:
-        if self._link_alias_service is None:
-            return []
-        cid = str(customer_id or "").strip()
-        if not cid:
-            return []
-        raw = str(text or "")
-        if not raw:
-            return []
-        with suppress(Exception):
-            return self._link_alias_service.register_links_from_text(
-                cid,
-                raw,
-                source=source,
-                limit=limit,
-            )
-        return []
+        return _register_links_from_text(
+            link_alias_service=self._link_alias_service,
+            customer_id=customer_id,
+            text=text,
+            source=source,
+            limit=limit,
+        )
 
     def expand_link_aliases(self, *, customer_id: str, text: str) -> str:
-        if self._link_alias_service is None:
-            return str(text or "")
-        cid = str(customer_id or "").strip()
-        raw = str(text or "")
-        if not cid or not raw or "link_" not in raw.lower():
-            return raw
-        with suppress(Exception):
-            return self._link_alias_service.expand_link_ids_in_text(cid, raw)
-        return raw
+        return _expand_link_aliases(
+            link_alias_service=self._link_alias_service,
+            customer_id=customer_id,
+            text=text,
+        )
 
     def resolve_link_aliases_in_args(self, *, customer_id: str, args: dict[str, Any]) -> dict[str, Any]:
-        if not isinstance(args, dict):
-            return {}
-
-        def _walk(value: Any) -> Any:
-            if isinstance(value, str):
-                if _LINK_ID_TOKEN_RE.search(value):
-                    return self.expand_link_aliases(customer_id=customer_id, text=value)
-                return value
-            if isinstance(value, list):
-                return [_walk(item) for item in value]
-            if isinstance(value, dict):
-                return {str(k): _walk(v) for k, v in value.items()}
-            return value
-
-        return {str(k): _walk(v) for k, v in args.items()}
+        return _resolve_link_aliases_in_args(
+            args=args,
+            expand_alias_text=lambda value: self.expand_link_aliases(
+                customer_id=customer_id,
+                text=value,
+            ),
+        )
 
     def _build_link_alias_context(self, *, customer_id: str, user_text: str) -> str:
-        if self._link_alias_service is None:
-            return ""
-        cid = str(customer_id or "").strip()
-        if not cid:
-            return ""
-        safe_user_text = str(user_text or "")
-        seen_ids: set[str] = set()
-        selected: list[dict[str, Any]] = []
-
-        try:
-            mentioned = self._link_alias_service.extract_link_ids(safe_user_text, limit=8)
-        except Exception:
-            mentioned = []
-        for link_id in mentioned:
-            with suppress(Exception):
-                item = self._link_alias_service.get_by_id(cid, link_id)
-                if not item:
-                    continue
-                lid = str(item.get("id", "")).strip().lower()
-                if not lid or lid in seen_ids:
-                    continue
-                seen_ids.add(lid)
-                selected.append(item)
-
-        max_aliases = 4
-        if len(selected) < max_aliases:
-            recent: list[dict[str, Any]] = []
-            with suppress(Exception):
-                recent = self._link_alias_service.list_recent(cid, limit=max_aliases)
-            for item in recent:
-                lid = str(item.get("id", "")).strip().lower()
-                if not lid or lid in seen_ids:
-                    continue
-                seen_ids.add(lid)
-                selected.append(item)
-                if len(selected) >= max_aliases:
-                    break
-
-        if not selected:
-            return ""
-        lines = [f"- {item['id']}: {item['url']}" for item in selected[:max_aliases]]
-        return (
-            "Known long-link aliases for this user:\n"
-            + "\n".join(lines)
-            + "\nUse alias IDs for long URLs. Outputting a known alias expands to the full URL."
+        return _build_link_alias_context(
+            link_alias_service=self._link_alias_service,
+            customer_id=customer_id,
+            user_text=user_text,
         )
 
     async def _load_active_directive(self, customer_id: str) -> str | None:
-        cid = str(customer_id or "").strip()
-        if not cid:
-            return None
-        if self._customer_profile_service is not None:
-            try:
-                return self._customer_profile_service.get_directive(cid)
-            except Exception:
-                pass
-        try:
-            r = await self._request_with_backoff(
-                "POST",
-                "/internal/directive/get",
-                json_body={"customer_id": cid},
-                timeout=5.0,
-                retries=1,
-            )
-            if r.status_code != 200:
-                return None
-            data = r.json()
-            directive = str(data.get("directive") or "").strip()
-            return directive or None
-        except Exception:
-            return None
+        return await _load_active_directive(
+            customer_id=customer_id,
+            customer_profile_service=self._customer_profile_service,
+            request_with_backoff=self._request_with_backoff,
+        )
 
     async def _load_user_utc_offset(self, customer_id: str) -> str | None:
-        cid = str(customer_id or "").strip()
-        if not cid:
-            return None
-        if self._customer_profile_service is not None:
-            with suppress(Exception):
-                return self._customer_profile_service.get_utc_offset(cid)
-        try:
-            r = await self._request_with_backoff(
-                "POST",
-                "/internal/time_profile/get",
-                json_body={"customer_id": cid},
-                timeout=5.0,
-                retries=1,
-            )
-            if r.status_code != 200:
-                return None
-            data = r.json()
-            offset = str(data.get("utc_offset") or "").strip()
-            return offset or None
-        except Exception:
-            return None
+        return await _load_user_utc_offset(
+            customer_id=customer_id,
+            customer_profile_service=self._customer_profile_service,
+            request_with_backoff=self._request_with_backoff,
+        )
 
     async def _list_available_skills(self, customer_id: str) -> list[dict[str, Any]]:
-        cid = str(customer_id or "").strip()
-        try:
-            r = await self._request_with_backoff(
-                "POST",
-                "/internal/skills/list",
-                json_body={
-                    "customer_id": cid,
-                    "include_global": True,
-                    "include_disabled": False,
-                    "limit": 200,
-                },
-                timeout=8.0,
-                retries=1,
-            )
-            if r.status_code != 200:
-                return []
-            data = r.json()
-            skills = data.get("skills", [])
-            if not isinstance(skills, list):
-                return []
-            out: list[dict[str, Any]] = []
-            for item in skills:
-                if not isinstance(item, dict):
-                    continue
-                name = str(item.get("name", "")).strip()
-                desc = str(item.get("description", "")).strip()
-                scope = str(item.get("scope", "")).strip() or "user"
-                if not name or not desc:
-                    continue
-                out.append(
-                    {
-                        "name": name,
-                        "description": desc,
-                        "scope": scope,
-                    }
-                )
-            return out
-        except Exception:
-            return []
+        return await _list_available_skills(
+            customer_id=customer_id,
+            request_with_backoff=self._request_with_backoff,
+        )
 
     async def _select_relevant_skills(
         self,
@@ -614,187 +456,52 @@ class OpenTulpaLangGraphRuntime:
         candidates: list[dict[str, Any]],
         max_skills: int = 2,
     ) -> list[dict[str, Any]]:
-        prompt_query = str(query or "").strip()
-        if not prompt_query or not candidates:
-            return []
-        shortlist = candidates[:80]
-        catalog = "\n".join(
-            [
-                f"- name={c['name']} scope={c['scope']} description={c['description'][:300]}"
-                for c in shortlist
-            ]
-        )
-        try:
-            response = await self._model.ainvoke(
-                [
-                    SystemMessage(
-                        content=(
-                            "You select reusable skills for the current user request.\n"
-                            "Return strict JSON object with key 'selected', an array of objects:\n"
-                            "  {\"name\": string, \"score\": number, \"reason\": string}\n"
-                            "Choose only skills that materially improve answer quality.\n"
-                            "If none apply, return {\"selected\": []}."
-                        )
-                    ),
-                    HumanMessage(
-                        content=(
-                            f"customer_id={customer_id}\n"
-                            f"user_request={prompt_query[:2000]}\n\n"
-                            f"available_skills:\n{catalog}"
-                        )
-                    ),
-                ]
-            )
-            raw = _content_to_text(getattr(response, "content", "")).strip()
-            parsed = self._extract_json_object(raw) or {}
-            selected_raw = parsed.get("selected", [])
-            if not isinstance(selected_raw, list):
-                return []
-            by_name = {c["name"]: c for c in shortlist}
-            selected: list[dict[str, Any]] = []
-            for item in selected_raw:
-                if not isinstance(item, dict):
-                    continue
-                name = str(item.get("name", "")).strip()
-                if not name or name not in by_name:
-                    continue
-                score_raw = item.get("score", 0)
-                try:
-                    score = float(score_raw)
-                except Exception:
-                    score = 0.0
-                if score < 0.45:
-                    continue
-                selected.append(
-                    {
-                        **by_name[name],
-                        "score": score,
-                        "reason": str(item.get("reason", "")).strip()[:300],
-                    }
-                )
-            selected.sort(key=lambda x: x.get("score", 0.0), reverse=True)
-            return selected[: max(1, min(int(max_skills), 3))]
-        except Exception:
-            return []
-
-    async def _resolve_skill_context(self, customer_id: str, user_text: str) -> dict[str, Any]:
-        cid = str(customer_id or "").strip()
-        query = str(user_text or "").strip()
-        if not cid or not query:
-            return {"skill_names": [], "context": ""}
-        candidates = await self._list_available_skills(cid)
-        if not candidates:
-            return {"skill_names": [], "context": ""}
-        selected = await self._select_relevant_skills(
-            customer_id=cid,
+        return await _select_relevant_skills(
+            customer_id=customer_id,
             query=query,
             candidates=candidates,
-            max_skills=1,
+            model=self._model,
+            extract_json_object=self._extract_json_object,
+            max_skills=max_skills,
         )
-        if not selected:
-            return {"skill_names": [], "context": ""}
 
-        sections: list[str] = []
-        skill_names: list[str] = []
-        total_chars = 0
-        max_total_chars = 9000
-        for item in selected:
-            name = str(item.get("name", "")).strip()
-            if not name:
-                continue
-            try:
-                r = await self._request_with_backoff(
-                    "POST",
-                    "/internal/skills/get",
-                    json_body={
-                        "customer_id": cid,
-                        "name": name,
-                        "include_files": False,
-                        "include_global": True,
-                    },
-                    timeout=8.0,
-                    retries=1,
-                )
-                if r.status_code != 200:
-                    continue
-                payload = r.json()
-                skill = payload.get("skill", {})
-                if not isinstance(skill, dict):
-                    continue
-                skill_md = str(skill.get("skill_markdown", "")).strip()
-                if not skill_md:
-                    continue
-                snippet = (
-                    f"Skill name: {name}\n"
-                    f"Scope: {skill.get('scope', '')}\n"
-                    f"Description: {skill.get('description', '')}\n"
-                    f"Selection reason: {item.get('reason', '')}\n\n"
-                    f"SKILL.md:\n{skill_md[:3500]}"
-                )
-                if total_chars + len(snippet) > max_total_chars:
-                    break
-                sections.append(snippet)
-                skill_names.append(name)
-                total_chars += len(snippet)
-            except Exception:
-                continue
-        context = "\n\n---\n\n".join(sections).strip()
-        return {"skill_names": skill_names, "context": context}
+    async def _resolve_skill_context(self, customer_id: str, user_text: str) -> dict[str, Any]:
+        return await _resolve_skill_context(
+            customer_id=customer_id,
+            user_text=user_text,
+            model=self._model,
+            request_with_backoff=self._request_with_backoff,
+            extract_json_object=self._extract_json_object,
+        )
 
     async def _build_live_time_context(self, customer_id: str) -> dict[str, str]:
-        now_server = datetime.now().astimezone()
-        now_utc = datetime.now(timezone.utc)
-        server_offset = now_server.utcoffset() or timedelta()
-        server_offset_minutes = int(server_offset.total_seconds() // 60)
-        server_offset_text = _minutes_to_utc_offset(server_offset_minutes)
-
-        user_offset_text = await self._load_user_utc_offset(customer_id)
-        source = "profile"
-        user_offset_minutes = (
-            _utc_offset_to_minutes(user_offset_text) if user_offset_text else None
+        return await _build_live_time_context(
+            customer_id=customer_id,
+            load_user_utc_offset=self._load_user_utc_offset,
+            minutes_to_utc_offset=_minutes_to_utc_offset,
+            utc_offset_to_minutes=_utc_offset_to_minutes,
         )
-        if user_offset_minutes is None:
-            user_offset_minutes = server_offset_minutes
-            user_offset_text = server_offset_text
-            source = "fallback_server_timezone"
-
-        user_local = now_utc + timedelta(minutes=user_offset_minutes)
-        return {
-            "server_time_local_iso": now_server.isoformat(),
-            "server_time_utc_iso": now_utc.isoformat(),
-            "server_utc_offset": server_offset_text,
-            "user_time_local_iso": user_local.isoformat(),
-            "user_utc_offset": user_offset_text,
-            "user_time_source": source,
-        }
 
     def _load_thread_rollup(self, thread_id: str) -> str | None:
-        tid = str(thread_id or "").strip()
-        if not tid or self._thread_rollup_service is None:
-            return None
-        try:
-            text = self._thread_rollup_service.get_rollup(tid)
-            return self._cap_rollup_text(text)
-        except Exception:
-            return None
+        return _load_thread_rollup(
+            thread_id=thread_id,
+            thread_rollup_service=self._thread_rollup_service,
+            context_rollup_tokens=self._context_rollup_tokens,
+        )
 
     def _save_thread_rollup(self, thread_id: str, rollup: str) -> None:
-        tid = str(thread_id or "").strip()
-        text = self._cap_rollup_text(rollup)
-        if not tid or not text or self._thread_rollup_service is None:
-            return
-        with suppress(Exception):
-            self._thread_rollup_service.set_rollup(tid, text)
+        _save_thread_rollup(
+            thread_id=thread_id,
+            rollup=rollup,
+            thread_rollup_service=self._thread_rollup_service,
+            context_rollup_tokens=self._context_rollup_tokens,
+        )
 
     def _cap_rollup_text(self, text: str | None) -> str:
-        raw = str(text or "").strip()
-        if not raw:
-            return ""
-        max_chars = max(800, int(self._context_rollup_tokens) * 4)
-        if len(raw) <= max_chars:
-            return raw
-        reserve = max(200, max_chars // 2 - 8)
-        return f"{raw[:reserve]}\n...\n{raw[-reserve:]}"
+        return _cap_rollup_text(
+            text=text,
+            context_rollup_tokens=self._context_rollup_tokens,
+        )
 
     @staticmethod
     def _extract_docx_text(raw_bytes: bytes) -> str:
@@ -897,47 +604,22 @@ class OpenTulpaLangGraphRuntime:
         customer_id: str,
         user_text: str,
     ) -> dict[str, Any]:
-        query = str(user_text or "").strip()
-        if not query:
-            return {
-                "active_skill_query": "",
-                "active_skill_context": "",
-                "active_skill_names": [],
-            }
-        resolved = await self._resolve_skill_context(customer_id, query)
-        context = str(resolved.get("context", "")).strip()
-        names_raw = resolved.get("skill_names", [])
-        names = [str(n).strip() for n in names_raw if str(n).strip()] if isinstance(names_raw, list) else []
-        return {
-            "active_skill_query": query,
-            "active_skill_context": context,
-            "active_skill_names": names,
-        }
+        return await _pre_resolve_skill_state(
+            customer_id=customer_id,
+            user_text=user_text,
+            model=self._model,
+            request_with_backoff=self._request_with_backoff,
+            extract_json_object=self._extract_json_object,
+        )
 
     async def start(self) -> None:
-        if self._graph is not None:
-            return
-        db_path = Path(self.checkpoint_db_path)
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._checkpointer_cm = AsyncSqliteSaver.from_conn_string(str(db_path))
-        self._checkpointer = await self._checkpointer_cm.__aenter__()
-        if hasattr(self._checkpointer, "setup"):
-            maybe_coro = self._checkpointer.setup()
-            if asyncio.iscoroutine(maybe_coro):
-                await maybe_coro
-        self._register_tools()
-        self._model_with_tools = self._model.bind_tools(list(self._tools.values()))
-        self._graph = self._build_graph()
+        await _start_runtime(self)
 
     async def shutdown(self) -> None:
-        if self._checkpointer_cm is not None:
-            await self._checkpointer_cm.__aexit__(None, None, None)
-        self._checkpointer_cm = None
-        self._checkpointer = None
-        self._graph = None
+        await _shutdown_runtime(self)
 
     def healthy(self) -> bool:
-        return self._graph is not None
+        return _runtime_healthy(self)
 
     async def ainvoke_text(
         self,
@@ -948,149 +630,14 @@ class OpenTulpaLangGraphRuntime:
         include_pending_context: bool = True,
         recursion_limit_override: int | None = None,
     ) -> str:
-        await self.start()
-        assert self._graph is not None
-        turn_trace_id = new_short_id("turn")
-        turn_state, effective_text = await self._thread_inputs.begin_turn(
-            thread_id=thread_id, text=text
+        return await _ainvoke_text(
+            self,
+            thread_id=thread_id,
+            customer_id=customer_id,
+            text=text,
+            include_pending_context=include_pending_context,
+            recursion_limit_override=recursion_limit_override,
         )
-        if turn_state is None:
-            self.log_behavior_event(
-                event="turn_merged",
-                trace_id=turn_trace_id,
-                mode="ainvoke",
-                thread_id=thread_id,
-                customer_id=customer_id,
-            )
-            return ""
-        try:
-            self.log_behavior_event(
-                event="turn_start",
-                trace_id=turn_trace_id,
-                mode="ainvoke",
-                thread_id=thread_id,
-                customer_id=customer_id,
-                input_chars=len(str(effective_text or "")),
-            )
-            await self._maybe_compact_thread_context(thread_id=thread_id, customer_id=customer_id)
-            merged_text, through_id = self._prepend_pending_context(
-                customer_id=customer_id,
-                text=effective_text,
-                include_pending_context=include_pending_context,
-            )
-            if await self._has_pending_approval_lock(customer_id=customer_id, thread_id=thread_id):
-                self.log_behavior_event(
-                    event="turn_blocked_pending_approval",
-                    trace_id=turn_trace_id,
-                    mode="ainvoke",
-                    thread_id=thread_id,
-                    customer_id=customer_id,
-                )
-                return ""
-            self.register_links_from_text(
-                customer_id=customer_id,
-                text=merged_text,
-                source="user_turn",
-                limit=30,
-            )
-            merged_text = self.expand_link_aliases(customer_id=customer_id, text=merged_text)
-            skill_state = await self._pre_resolve_skill_state(
-                customer_id=customer_id,
-                user_text=merged_text,
-            )
-            effective_recursion_limit = (
-                max(5, min(int(recursion_limit_override), 200))
-                if recursion_limit_override is not None
-                else self.recursion_limit
-            )
-            config = {
-                "configurable": {"thread_id": thread_id},
-                "recursion_limit": effective_recursion_limit,
-            }
-            result = await self._graph.ainvoke(
-                {
-                    "messages": [HumanMessage(content=merged_text)],
-                    "customer_id": customer_id,
-                    "thread_id": thread_id,
-                    "agent_trace_id": turn_trace_id,
-                    "tool_error_count": 0,
-                    "approval_handoff": False,
-                    "claim_check_retry_count": 0,
-                    "claim_check_needs_retry": False,
-                    **skill_state,
-                },
-                config=config,
-            )
-            if bool(result.get("approval_handoff", False)):
-                self.log_behavior_event(
-                    event="turn_approval_handoff",
-                    trace_id=turn_trace_id,
-                    mode="ainvoke",
-                    thread_id=thread_id,
-                    customer_id=customer_id,
-                )
-                return ""
-            messages = result.get("messages", [])
-            for message in reversed(messages):
-                if isinstance(message, AIMessage) and (message.content or "").strip():
-                    cleaned = self._strip_internal_json_prefix(str(message.content))
-                    if self._has_incomplete_internal_json_prefix(cleaned):
-                        continue
-                    self.register_links_from_text(
-                        customer_id=customer_id,
-                        text=cleaned,
-                        source="assistant_turn",
-                        limit=30,
-                    )
-                    cleaned = self.expand_link_aliases(customer_id=customer_id, text=cleaned)
-                    if through_id is not None and self._context_events is not None:
-                        self._context_events.clear_events(customer_id, through_id=through_id)
-                    self.log_behavior_event(
-                        event="turn_complete",
-                        trace_id=turn_trace_id,
-                        mode="ainvoke",
-                        thread_id=thread_id,
-                        customer_id=customer_id,
-                        output_chars=len(cleaned.strip()),
-                    )
-                    return cleaned.strip()
-            self.log_behavior_event(
-                event="turn_no_visible_reply",
-                trace_id=turn_trace_id,
-                mode="ainvoke",
-                thread_id=thread_id,
-                customer_id=customer_id,
-            )
-            return "I ran into an issue and could not produce a final response yet."
-        except Exception as exc:
-            self.log_behavior_event(
-                event="turn_exception",
-                trace_id=turn_trace_id,
-                mode="ainvoke",
-                thread_id=thread_id,
-                customer_id=customer_id,
-                error=str(exc)[:500],
-            )
-            raise
-        finally:
-            self._thread_inputs.end_turn(turn_state)
-
-    async def _begin_thread_turn(
-        self,
-        *,
-        thread_id: str,
-        text: str,
-    ) -> tuple[Any | None, str]:
-        """
-        Backward-compatible wrapper for tests/internal callers that relied on
-        the previous runtime-local turn debounce API.
-        """
-        return await self._thread_inputs.begin_turn(thread_id=thread_id, text=text)
-
-    @staticmethod
-    def _end_thread_turn(state: Any | None) -> None:
-        """Backward-compatible wrapper around thread turn release."""
-        ThreadInputCoordinator.end_turn(state)
 
     async def astream_text(
         self,
@@ -1100,271 +647,17 @@ class OpenTulpaLangGraphRuntime:
         text: str,
         include_pending_context: bool = True,
     ) -> AsyncIterator[str]:
-        await self.start()
-        assert self._graph is not None
-        turn_trace_id = new_short_id("turn")
-        turn_state, effective_text = await self._thread_inputs.begin_turn(
-            thread_id=thread_id, text=text
-        )
-        if turn_state is None:
-            logger.info(
-                "runtime.astream_text merged_input thread_id=%s customer_id=%s",
-                thread_id,
-                customer_id,
-            )
-            self.log_behavior_event(
-                event="turn_merged",
-                trace_id=turn_trace_id,
-                mode="astream",
-                thread_id=thread_id,
-                customer_id=customer_id,
-            )
-            raise MergedInputSuppressedError("input merged into previous in-flight turn")
-        try:
-            logger.info(
-                "runtime.astream_text start thread_id=%s customer_id=%s text_chars=%s",
-                thread_id,
-                customer_id,
-                len(str(effective_text or "")),
-            )
-            self.log_behavior_event(
-                event="turn_start",
-                trace_id=turn_trace_id,
-                mode="astream",
-                thread_id=thread_id,
-                customer_id=customer_id,
-                input_chars=len(str(effective_text or "")),
-            )
-            await self._maybe_compact_thread_context(thread_id=thread_id, customer_id=customer_id)
-            merged_text, through_id = self._prepend_pending_context(
-                customer_id=customer_id,
-                text=effective_text,
-                include_pending_context=include_pending_context,
-            )
-            if await self._has_pending_approval_lock(customer_id=customer_id, thread_id=thread_id):
-                yielded_any = True
-                self.log_behavior_event(
-                    event="turn_blocked_pending_approval",
-                    trace_id=turn_trace_id,
-                    mode="astream",
-                    thread_id=thread_id,
-                    customer_id=customer_id,
-                )
-                yield STREAM_APPROVAL_HANDOFF_SIGNAL
-                return
-            self.register_links_from_text(
-                customer_id=customer_id,
-                text=merged_text,
-                source="user_turn",
-                limit=30,
-            )
-            merged_text = self.expand_link_aliases(customer_id=customer_id, text=merged_text)
-            skill_state = await self._pre_resolve_skill_state(
-                customer_id=customer_id,
-                user_text=merged_text,
-            )
-            config = {"configurable": {"thread_id": thread_id}, "recursion_limit": self.recursion_limit}
-            segment_accumulated = ""
-            stream_key = ""
-            yielded_any = False
-            saw_agent_output = False
-            in_tool_phase = False
-            approval_handoff_detected = False
-
-            def _finalize_segment() -> None:
-                nonlocal segment_accumulated
-                if not segment_accumulated:
-                    return
-                cleaned_segment = self._strip_internal_json_prefix(segment_accumulated)
-                if cleaned_segment.strip() and not self._has_incomplete_internal_json_prefix(
-                    cleaned_segment
-                ):
-                    self.register_links_from_text(
-                        customer_id=customer_id,
-                        text=cleaned_segment,
-                        source="assistant_turn",
-                        limit=30,
-                    )
-                segment_accumulated = ""
-
-            async for message_chunk, metadata in self._graph.astream(
-                {
-                    "messages": [HumanMessage(content=merged_text)],
-                    "customer_id": customer_id,
-                    "thread_id": thread_id,
-                    "agent_trace_id": turn_trace_id,
-                    "tool_error_count": 0,
-                    "claim_check_retry_count": 0,
-                    "claim_check_needs_retry": False,
-                    **skill_state,
-                },
-                config=config,
-                stream_mode="messages",
-            ):
-                node_name = str(metadata.get("langgraph_node", "")).strip().lower()
-                if node_name != "agent":
-                    if node_name == "tools":
-                        tool_text = _content_to_text(getattr(message_chunk, "content", "")).strip()
-                        if isinstance(message_chunk, ToolMessage) and tool_text == "APPROVAL_HANDOFF":
-                            approval_handoff_detected = True
-                    if saw_agent_output and not in_tool_phase:
-                        in_tool_phase = True
-                        _finalize_segment()
-                        yield STREAM_WAIT_SIGNAL
-                    continue
-                if in_tool_phase:
-                    in_tool_phase = False
-                    stream_key = ""
-                    _finalize_segment()
-                chunk_key = str(getattr(message_chunk, "id", "") or "")
-                if chunk_key and stream_key and chunk_key != stream_key:
-                    _finalize_segment()
-                if chunk_key:
-                    stream_key = chunk_key
-                if message_chunk.content:
-                    saw_agent_output = True
-                    segment_accumulated += str(message_chunk.content)
-                    cleaned = self._strip_internal_json_prefix(segment_accumulated)
-                    if not cleaned.strip():
-                        continue
-                    if cleaned == segment_accumulated and self._has_incomplete_internal_json_prefix(
-                        segment_accumulated
-                    ):
-                        continue
-                    expanded = self.expand_link_aliases(customer_id=customer_id, text=cleaned)
-                    if expanded.strip():
-                        yielded_any = True
-                        yield expanded
-
-            if through_id is not None and self._context_events is not None:
-                self._context_events.clear_events(customer_id, through_id=through_id)
-            _finalize_segment()
-            if not yielded_any and approval_handoff_detected:
-                yielded_any = True
-                self.log_behavior_event(
-                    event="turn_approval_handoff",
-                    trace_id=turn_trace_id,
-                    mode="astream",
-                    thread_id=thread_id,
-                    customer_id=customer_id,
-                )
-                yield STREAM_APPROVAL_HANDOFF_SIGNAL
-            if not yielded_any:
-                logger.warning(
-                    "runtime.astream_text no_visible_chunks thread_id=%s customer_id=%s; invoking fallback",
-                    thread_id,
-                    customer_id,
-                )
-                self.log_behavior_event(
-                    event="turn_stream_no_visible_chunks",
-                    trace_id=turn_trace_id,
-                    thread_id=thread_id,
-                    customer_id=customer_id,
-                )
-                fallback_result = await self._graph.ainvoke(
-                    {
-                        "messages": [HumanMessage(content=merged_text)],
-                        "customer_id": customer_id,
-                        "thread_id": thread_id,
-                        "agent_trace_id": turn_trace_id,
-                        "tool_error_count": 0,
-                        "approval_handoff": False,
-                        "claim_check_retry_count": 0,
-                        "claim_check_needs_retry": False,
-                        **skill_state,
-                    },
-                    config=config,
-                )
-                if bool(fallback_result.get("approval_handoff", False)):
-                    yielded_any = True
-                    self.log_behavior_event(
-                        event="turn_approval_handoff",
-                        trace_id=turn_trace_id,
-                        mode="astream",
-                        thread_id=thread_id,
-                        customer_id=customer_id,
-                    )
-                    yield STREAM_APPROVAL_HANDOFF_SIGNAL
-                    fallback_result = {"messages": []}
-                fallback_messages = fallback_result.get("messages", [])
-                fallback_yielded = False
-                for message in reversed(fallback_messages):
-                    if isinstance(message, AIMessage) and (message.content or "").strip():
-                        cleaned = self._strip_internal_json_prefix(str(message.content))
-                        if self._has_incomplete_internal_json_prefix(cleaned):
-                            continue
-                        if cleaned.strip():
-                            self.register_links_from_text(
-                                customer_id=customer_id,
-                                text=cleaned,
-                                source="assistant_turn",
-                                limit=30,
-                            )
-                            cleaned = self.expand_link_aliases(
-                                customer_id=customer_id,
-                                text=cleaned,
-                            )
-                            fallback_yielded = True
-                            self.log_behavior_event(
-                                event="turn_stream_fallback_yielded",
-                                trace_id=turn_trace_id,
-                                thread_id=thread_id,
-                                customer_id=customer_id,
-                                output_chars=len(cleaned.strip()),
-                            )
-                            yield cleaned.strip()
-                            break
-                if not fallback_yielded:
-                    logger.error(
-                        "runtime.astream_text fallback_no_ai_message thread_id=%s customer_id=%s messages_count=%s",
-                        thread_id,
-                        customer_id,
-                        len(fallback_messages),
-                    )
-                    self.register_links_from_text(
-                        customer_id=customer_id,
-                        text=STREAM_EMPTY_REPLY_FALLBACK,
-                        source="assistant_turn",
-                        limit=5,
-                    )
-                    yielded_any = True
-                    self.log_behavior_event(
-                        event="turn_stream_fallback_empty",
-                        trace_id=turn_trace_id,
-                        thread_id=thread_id,
-                        customer_id=customer_id,
-                    )
-                    yield STREAM_EMPTY_REPLY_FALLBACK
-            logger.info(
-                "runtime.astream_text complete thread_id=%s customer_id=%s yielded_any=%s",
-                thread_id,
-                customer_id,
-                yielded_any,
-            )
-            self.log_behavior_event(
-                event="turn_complete",
-                trace_id=turn_trace_id,
-                mode="astream",
-                thread_id=thread_id,
-                customer_id=customer_id,
-                yielded_any=yielded_any,
-            )
-        except Exception:
-            logger.exception(
-                "runtime.astream_text failed thread_id=%s customer_id=%s",
-                thread_id,
-                customer_id,
-            )
-            self.log_behavior_event(
-                event="turn_exception",
-                trace_id=turn_trace_id,
-                mode="astream",
-                thread_id=thread_id,
-                customer_id=customer_id,
-            )
-            raise
-        finally:
-            self._thread_inputs.end_turn(turn_state)
+        async for chunk in _astream_text(
+            self,
+            thread_id=thread_id,
+            customer_id=customer_id,
+            text=text,
+            stream_wait_signal=STREAM_WAIT_SIGNAL,
+            stream_approval_handoff_signal=STREAM_APPROVAL_HANDOFF_SIGNAL,
+            stream_empty_reply_fallback=STREAM_EMPTY_REPLY_FALLBACK,
+            include_pending_context=include_pending_context,
+        ):
+            yield chunk
 
     async def classify_wake_event(
         self,
@@ -1372,36 +665,13 @@ class OpenTulpaLangGraphRuntime:
         customer_id: str,
         event_label: str,
         payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Let the model decide whether a wake event should interrupt the user now."""
-        try:
-            response = await self._wake_classifier_model.ainvoke(
-                [
-                    SystemMessage(
-                        content=(
-                            "You classify background assistant events.\n"
-                            "Return strict JSON with keys: notify_user (bool), reason (string).\n"
-                            "Use notify_user=true only when immediate user attention is required."
-                        )
-                    ),
-                    HumanMessage(
-                        content=(
-                            f"customer_id={customer_id}\n"
-                            f"event_label={event_label}\n"
-                            f"payload={json.dumps(payload, ensure_ascii=False)[:5000]}"
-                        )
-                    ),
-                ]
-            )
-            raw = response.content if hasattr(response, "content") else str(response)
-            raw_text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
-            parsed = self._extract_json_object(raw_text) or {}
-            return {
-                "notify_user": bool(parsed.get("notify_user", False)),
-                "reason": str(parsed.get("reason", "")).strip()[:500],
-            }
-        except Exception as exc:
-            return {"notify_user": False, "reason": f"classifier_error:{exc}"}
+    ) -> WakeEventDecision:
+        return await _classify_wake_event_facade(
+            self,
+            customer_id=customer_id,
+            event_label=event_label,
+            payload=payload,
+        )
 
     async def verify_completion_claim(
         self,
@@ -1410,119 +680,14 @@ class OpenTulpaLangGraphRuntime:
         assistant_text: str,
         recent_tool_outputs: list[str],
         turn_window: str | None = None,
-    ) -> dict[str, Any]:
-        """
-        Verify that immediate-action completion claims are supported by tool evidence.
-
-        This check is intentionally conservative: on uncertainty it should not force a retry.
-        """
-        safe_assistant = str(assistant_text or "").strip()
-        if not safe_assistant:
-            return {
-                "ok": True,
-                "applies": False,
-                "mismatch": False,
-                "confidence": 0.0,
-                "reason": "empty_assistant_text",
-                "repair_instruction": "",
-                "usable": True,
-            }
-        safe_user = str(user_text or "").strip()
-        safe_turn_window = str(turn_window or "").strip()
-        safe_tools: list[str] = []
-        for raw in (recent_tool_outputs or []):
-            text = " ".join(str(raw or "").split()).strip()
-            if text:
-                safe_tools.append(text)
-
-        try:
-            response = await self._guardrail_classifier_model.ainvoke(
-                [
-                    SystemMessage(
-                        content=(
-                            "You verify assistant execution claims against tool evidence.\n"
-                            "Return strict JSON only with keys:\n"
-                            "ok (bool), applies (bool), mismatch (bool), confidence (0..1), "
-                            "reason (string <= 180 chars), repair_instruction (string <= 220 chars).\n"
-                            "Decision policy (conservative, non-aggressive):\n"
-                            "- applies=true only if assistant explicitly claims something was already done/launched/sent/posted/scheduled now.\n"
-                            "- applies=true if assistant commits to an immediate follow-up action in this same turn "
-                            "(e.g., 'doing this now', 'retrying now', 'give me a moment') that should produce tool evidence.\n"
-                            "- applies=true if assistant asks the user to approve/deny or says approval is pending now.\n"
-                            "- If user_message asks only for an outcome/failure summary, assistant must not promise "
-                            "new immediate execution unless tool evidence exists in this turn.\n"
-                            "- If assistant is future-tense or conditional without immediate-action claims, set applies=false and mismatch=false.\n"
-                            "- mismatch=true only when there is a clear immediate completion claim without matching success evidence in tool outputs.\n"
-                            "- mismatch=true when assistant commits immediate follow-up execution now but no matching tool evidence exists.\n"
-                            "- If assistant claims completed/updated/created/scheduled now AND also states approval is pending, set mismatch=true.\n"
-                            "- If assistant asks for approval (or says approval is pending) but tool evidence lacks a pending-approval artifact "
-                            "(e.g., approval_id, APPROVAL_PENDING, or explicit pending challenge), set mismatch=true.\n"
-                            "- If evidence is ambiguous/partial, prefer mismatch=false.\n"
-                            "- If tool outputs show approval pending, denial, or tool error while assistant claims success now, mismatch=true.\n"
-                            "- repair_instruction should tell the agent to either run the missing tool now or restate status honestly.\n"
-                            "No markdown. No extra keys."
-                        )
-                    ),
-                    HumanMessage(
-                        content=(
-                            f"user_message={safe_user}\n"
-                            f"assistant_message={safe_assistant}\n"
-                            f"turn_window={safe_turn_window}\n"
-                            f"recent_tool_outputs={json.dumps(safe_tools, ensure_ascii=False)}"
-                        )
-                    ),
-                ]
-            )
-            raw = response.content if hasattr(response, "content") else str(response)
-            raw_text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
-            parsed = self._extract_json_object(raw_text)
-            if not isinstance(parsed, dict):
-                return {
-                    "ok": False,
-                    "applies": False,
-                    "mismatch": False,
-                    "confidence": 0.0,
-                    "reason": "invalid_checker_output:no_json_object",
-                    "repair_instruction": "",
-                    "usable": False,
-                }
-            required_keys = {"ok", "applies", "mismatch", "confidence", "reason", "repair_instruction"}
-            if not required_keys.issubset(parsed.keys()):
-                missing = ",".join(sorted(required_keys.difference(parsed.keys())))
-                return {
-                    "ok": False,
-                    "applies": False,
-                    "mismatch": False,
-                    "confidence": 0.0,
-                    "reason": f"invalid_checker_output:missing_keys:{missing}"[:180],
-                    "repair_instruction": "",
-                    "usable": False,
-                }
-            applies = bool(parsed.get("applies", False))
-            mismatch = bool(parsed.get("mismatch", False)) if applies else False
-            try:
-                confidence = float(parsed.get("confidence", 0.0))
-            except Exception:
-                confidence = 0.0
-            return {
-                "ok": bool(parsed.get("ok", True)),
-                "applies": applies,
-                "mismatch": mismatch,
-                "confidence": max(0.0, min(confidence, 1.0)),
-                "reason": str(parsed.get("reason", "")).strip()[:180],
-                "repair_instruction": str(parsed.get("repair_instruction", "")).strip()[:220],
-                "usable": True,
-            }
-        except Exception as exc:
-            return {
-                "ok": False,
-                "applies": False,
-                "mismatch": False,
-                "confidence": 0.0,
-                "reason": f"classifier_error:{exc}",
-                "repair_instruction": "",
-                "usable": False,
-            }
+    ) -> CompletionClaimVerification:
+        return await _verify_completion_claim_facade(
+            self,
+            user_text=user_text,
+            assistant_text=assistant_text,
+            recent_tool_outputs=recent_tool_outputs,
+            turn_window=turn_window,
+        )
 
     async def classify_guardrail_intent(
         self,
@@ -1530,126 +695,13 @@ class OpenTulpaLangGraphRuntime:
         action_name: str,
         action_args: dict[str, Any],
         action_note: str | None = None,
-    ) -> dict[str, Any]:
-        """
-        Isolated, compact classifier for approval guardrails.
-
-        Returns strict JSON-like payload:
-        {
-          "ok": bool,
-          "gate": "allow|require_approval|deny",
-          "impact_type": "read|write|purchase|costly",
-          "recipient_scope": "self|external|unknown",
-          "confidence": float,
-          "reason": str
-        }
-        """
-        safe_name = str(action_name or "").strip()
-        if not safe_name:
-            return {"ok": False, "error": "missing_action_name"}
-
-        safe_args: dict[str, Any] = {}
-        sensitive_parts = {"key", "token", "secret", "password", "authorization", "api"}
-        for key, value in (action_args or {}).items():
-            key_text = str(key).strip()
-            lower_key = key_text.lower()
-            if any(part in lower_key for part in sensitive_parts):
-                safe_args[key_text] = "***"
-                continue
-            if isinstance(value, str):
-                if lower_key in {"command", "script", "implementation_command", "code"}:
-                    safe_args[key_text] = value[:12000]
-                else:
-                    safe_args[key_text] = value[:500]
-            elif isinstance(value, (int, float, bool)) or value is None:
-                safe_args[key_text] = value
-            elif isinstance(value, list):
-                safe_args[key_text] = [str(item)[:120] for item in value[:12]]
-            elif isinstance(value, dict):
-                safe_args[key_text] = {
-                    str(k)[:40]: str(v)[:120] for k, v in list(value.items())[:12]
-                }
-            else:
-                safe_args[key_text] = str(value)[:200]
-
-        try:
-            response = await self._guardrail_classifier_model.ainvoke(
-                [
-                    SystemMessage(
-                        content=(
-                            "Classify action safety intent for an approval gate.\n"
-                            "Return strict JSON object only with keys:\n"
-                            "ok (bool), gate (allow|require_approval|deny),\n"
-                            "impact_type (read|write|purchase|costly),\n"
-                            "recipient_scope (self|external|unknown),\n"
-                            "confidence (0..1), reason (string <= 160 chars).\n"
-                            "Rules:\n"
-                            "- Approval should be required in exactly one case: external write side effects.\n"
-                            "- External write means mutating/posting/sending/purchasing/updating data on services "
-                            "outside this local project/runtime.\n"
-                            "- Treat ANY non-localhost network mutation as external write.\n"
-                            "- For shell/terminal commands, classify from literal command intent, not user phrasing.\n"
-                            "- If command contains write verbs/flags with remote URLs, set gate=require_approval.\n"
-                            "- High-signal external write indicators include: "
-                            "curl -X POST|PUT|PATCH|DELETE, --request POST|PUT|PATCH|DELETE, "
-                            "--data/-d/--json with http(s) URL, requests.post/put/patch/delete, "
-                            "httpx.post/put/patch/delete, fetch(...,{method:'POST'|'PUT'|'PATCH'|'DELETE'}).\n"
-                            "- URLs to localhost/127.0.0.1/::1 are local; do not treat as external by URL alone.\n"
-                            "- Internal reads/writes (repo files, local artifacts, local config/state) are allow.\n"
-                            "- Remote reads/fetch/summarization without external mutation are allow.\n"
-                            "- Never set gate=require_approval for read-only actions, including external/API/web "
-                            "reads.\n"
-                            "- For tulpa_run_terminal, classify from full command/script text in action_args.command.\n"
-                            "- For routine_create, evaluate planned downstream behavior from action_args + action_note:\n"
-                            "  * inspect implementation_command/implementation fields as the execution artifact.\n"
-                            "  * if future scheduled behavior includes external writes, set gate=require_approval.\n"
-                            "  * otherwise set gate=allow.\n"
-                            "- For non-routine actions, set gate=require_approval only when this immediate action "
-                            "implies external write side effects.\n"
-                            "- If uncertain on a command that includes a non-localhost URL plus write-like markers, "
-                            "escalate to require_approval.\n"
-                            "- If uncertain without write-like markers, set gate=allow with recipient_scope=unknown "
-                            "or self as appropriate.\n"
-                            "- Use deny only for actions that should never run as requested.\n"
-                            "- Treat action_note as agent reasoning about next planned action and likely tool path.\n"
-                            "Do not include any extra keys or markdown."
-                        )
-                    ),
-                    HumanMessage(
-                        content=(
-                            f"action_name={safe_name}\n"
-                            f"action_args={json.dumps(safe_args, ensure_ascii=False)[:20000]}\n"
-                            f"action_note={str(action_note or '').strip()[:2000]}"
-                        )
-                    ),
-                ]
-            )
-            raw = response.content if hasattr(response, "content") else str(response)
-            raw_text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
-            parsed = self._extract_json_object(raw_text) or {}
-            gate = str(parsed.get("gate", "")).strip().lower()
-            impact_type = str(parsed.get("impact_type", "")).strip().lower()
-            recipient_scope = str(parsed.get("recipient_scope", "")).strip().lower()
-            if gate not in {"allow", "require_approval", "deny"}:
-                return {"ok": False, "error": "invalid_gate"}
-            if impact_type not in {"read", "write", "purchase", "costly"}:
-                return {"ok": False, "error": "invalid_impact_type"}
-            if recipient_scope not in {"self", "external", "unknown"}:
-                return {"ok": False, "error": "invalid_recipient_scope"}
-            try:
-                confidence = float(parsed.get("confidence", 0.0))
-            except Exception:
-                confidence = 0.0
-            return {
-                "ok": True,
-                "gate": gate,
-                "impact_type": impact_type,
-                "recipient_scope": recipient_scope,
-                "confidence": max(0.0, min(confidence, 1.0)),
-                "reason": str(parsed.get("reason", "")).strip()[:160],
-            }
-        except Exception as exc:
-            return {"ok": False, "error": f"classifier_error:{exc}"}
+    ) -> GuardrailIntentDecision:
+        return await _classify_guardrail_intent_facade(
+            self,
+            action_name=action_name,
+            action_args=action_args,
+            action_note=action_note,
+        )
 
     async def evaluate_tool_guardrail(
         self,
@@ -1659,85 +711,15 @@ class OpenTulpaLangGraphRuntime:
         action_name: str,
         action_args: dict[str, Any],
         action_note: str | None = None,
-    ) -> dict[str, Any]:
-        """Call upstream approval broker to evaluate a tool call at action time."""
-        safe_cmd = ""
-        if action_name == "tulpa_run_terminal":
-            safe_cmd = str((action_args or {}).get("command", "")).strip()[:300]
-        try:
-            response = await self._request_with_backoff(
-                "POST",
-                "/internal/approvals/evaluate",
-                json_body={
-                    "customer_id": customer_id,
-                    "thread_id": thread_id,
-                    "action_name": action_name,
-                    "action_args": action_args if isinstance(action_args, dict) else {},
-                    "action_note": str(action_note or "").strip()[:2000],
-                    "defer_challenge_delivery": True,
-                },
-                timeout=12.0,
-                retries=1,
-            )
-            if response.status_code != 200:
-                self.log_behavior_event(
-                    event="guardrail.evaluate.http_error",
-                    thread_id=thread_id,
-                    customer_id=customer_id,
-                    action_name=action_name,
-                    command=safe_cmd,
-                    status_code=response.status_code,
-                    gate="require_approval",
-                )
-                return {
-                    "gate": "require_approval",
-                    "reason": f"guardrail_http_{response.status_code}",
-                    "summary": f"execute {action_name}",
-                }
-            payload = response.json()
-            if isinstance(payload, dict):
-                self.log_behavior_event(
-                    event="guardrail.evaluate.decision",
-                    thread_id=thread_id,
-                    customer_id=customer_id,
-                    action_name=action_name,
-                    command=safe_cmd,
-                    gate=str(payload.get("gate", "")),
-                    reason=str(payload.get("reason", ""))[:200],
-                    impact_type=str(payload.get("impact_type", "")),
-                    recipient_scope=str(payload.get("recipient_scope", "")),
-                    confidence=payload.get("confidence"),
-                )
-                return payload
-            self.log_behavior_event(
-                event="guardrail.evaluate.invalid_payload",
-                thread_id=thread_id,
-                customer_id=customer_id,
-                action_name=action_name,
-                command=safe_cmd,
-                gate="require_approval",
-            )
-            return {
-                "gate": "require_approval",
-                "reason": "guardrail_invalid_payload",
-                "summary": f"execute {action_name}",
-            }
-        except Exception as exc:
-            exc_name = type(exc).__name__
-            self.log_behavior_event(
-                event="guardrail.evaluate.exception",
-                thread_id=thread_id,
-                customer_id=customer_id,
-                action_name=action_name,
-                command=safe_cmd,
-                gate="require_approval",
-                error=f"{exc_name}: {exc}",
-            )
-            return {
-                "gate": "require_approval",
-                "reason": f"guardrail_request_error:{exc_name}",
-                "summary": f"execute {action_name}",
-            }
+    ) -> ToolGuardrailDecision:
+        return await _evaluate_tool_guardrail_facade(
+            self,
+            customer_id=customer_id,
+            thread_id=thread_id,
+            action_name=action_name,
+            action_args=action_args,
+            action_note=action_note,
+        )
 
     async def _request_with_backoff(
         self,
@@ -1749,20 +731,15 @@ class OpenTulpaLangGraphRuntime:
         timeout: float = 20.0,
         retries: int = 2,
     ) -> httpx.Response:
-        return await self._internal_api.request_with_backoff(
-            method=method,
-            path=path,
+        return await _request_with_backoff_facade(
+            self,
+            method,
+            path,
             params=params,
             json_body=json_body,
             timeout=timeout,
             retries=retries,
         )
-
-    def _register_tools(self) -> None:
-        self._tools = register_runtime_tools(self)
-
-    def _build_graph(self):
-        return build_runtime_graph(self)
 
     async def execute_tool(
         self,
@@ -1772,54 +749,11 @@ class OpenTulpaLangGraphRuntime:
         customer_id: str | None = None,
         inject_customer_id: bool = False,
     ) -> Any:
-        """
-        Public runtime API for tool execution outside normal graph turns.
-
-        Used by approval execution to avoid coupling to private runtime attributes.
-        """
-        await self.start()
-        self.log_behavior_event(
-            event="tool_execute_start",
-            action_name=str(action_name or "").strip(),
-            customer_id=str(customer_id or "").strip(),
+        return await _execute_tool_facade(
+            self,
+            action_name=action_name,
+            action_args=action_args,
+            customer_id=customer_id,
+            inject_customer_id=inject_customer_id,
+            approval_execution_customer_id_tools=APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS,
         )
-        tool_fn = self._tools.get(str(action_name or "").strip())
-        if tool_fn is None:
-            self.log_behavior_event(
-                event="tool_execute_missing",
-                action_name=str(action_name or "").strip(),
-                customer_id=str(customer_id or "").strip(),
-            )
-            raise RuntimeError(f"unknown tool: {action_name}")
-        args = action_args if isinstance(action_args, dict) else {}
-        if inject_customer_id and action_name in APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS:
-            args = {**args, "customer_id": str(customer_id or "").strip()}
-        args = self.resolve_link_aliases_in_args(
-            customer_id=str(customer_id or "").strip(),
-            args=args,
-        )
-        try:
-            result = await tool_fn.ainvoke(args)
-        except Exception as exc:
-            self.log_behavior_event(
-                event="tool_execute_error",
-                action_name=str(action_name or "").strip(),
-                customer_id=str(customer_id or "").strip(),
-                error=str(exc)[:500],
-            )
-            raise
-        cid = str(customer_id or "").strip()
-        if cid:
-            self.register_links_from_text(
-                customer_id=cid,
-                text=json.dumps(result, ensure_ascii=False, default=str),
-                source=f"tool:{action_name}",
-                limit=40,
-            )
-        self.log_behavior_event(
-            event="tool_execute_complete",
-            action_name=str(action_name or "").strip(),
-            customer_id=str(customer_id or "").strip(),
-            result_ok=(not isinstance(result, dict) or bool(result.get("ok", True))),
-        )
-        return result

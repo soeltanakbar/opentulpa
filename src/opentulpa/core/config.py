@@ -60,6 +60,10 @@ class Settings(BaseSettings):
         default=".opentulpa/pending_approvals.db",
         description="SQLite path for external-impact pending approvals.",
     )
+    wake_events_db_path: str = Field(
+        default=".opentulpa/wake_events.db",
+        description="SQLite path for durable wake-event queue.",
+    )
     approvals_ttl_minutes: int = Field(
         default=10,
         ge=1,
@@ -76,11 +80,6 @@ class Settings(BaseSettings):
     telegram_allowed_user_ids: str | None = Field(
         default=None,
         description="Optional CSV allowlist of Telegram numeric user IDs.",
-    )
-
-    # Slack (for Slack skill: list channels, read history, post)
-    slack_bot_token: str | None = Field(
-        default=None, description="Slack Bot OAuth token (xoxb-...)"
     )
     telegram_webhook_secret: str | None = Field(
         default=None,
